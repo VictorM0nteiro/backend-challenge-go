@@ -6,6 +6,8 @@ var (
 	ErrWalletNotFound        = errors.New("postgres: wallet not found")
 	ErrWalletVersionConflict = errors.New("postgres: wallet version conflict")
 	ErrDuplicateLedgerEntry  = errors.New("postgres: duplicate ledger entry for this wallet and transaction")
+	ErrIdempotencyKeyReuse   = errors.New("postgres: idempotency key reused with a different request body")
+	ErrRequestInFlight       = errors.New("postgres: a request with this idempotency key is still in flight")
 )
 
 // Explicação

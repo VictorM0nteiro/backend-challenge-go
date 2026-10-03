@@ -37,7 +37,7 @@ CREATE TABLE idempotency_keys (
     request_hash         TEXT NOT NULL,
     state                TEXT NOT NULL CHECK (state IN ('in_flight', 'completed')),
     status_code          INT,
-    response_body        JSONB,
+    response_body        TEXT,
     wager_transaction_id UUID REFERENCES wager_transactions(id),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (scope, endpoint, key),

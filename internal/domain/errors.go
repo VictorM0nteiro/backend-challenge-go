@@ -6,7 +6,7 @@ var (
 	ErrInvalidAmount           = errors.New("domain: invalid amount")
 	ErrInvalidCurrency         = errors.New("domain: invalid currency code")
 	ErrCurrencyMismatch        = errors.New("domain: currency mismatch")
-	ErrMoneyOverflow           = errors.New("domain: money operantion overflows int64")
+	ErrMoneyOverflow           = errors.New("domain: money operation overflows int64")
 	ErrInsufficientFunds       = errors.New("domain: insufficient funds")
 	ErrInvalidWagerTransaction = errors.New("domain: invalid wager transaction")
 	ErrInvalidWagerTransition  = errors.New("domain: invalid wager state transition")
