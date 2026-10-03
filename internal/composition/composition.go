@@ -28,11 +28,11 @@ var ConfigModule = fx.Module("config",
 
 // PersistenceModule provides the connection pool and the adapters built on it.
 var PersistenceModule = fx.Module("persistence",
-      fx.Provide(
-              newPool,
-              postgres.NewWalletRepository,
-              postgres.NewWagerProcessor,
-      ),
+	fx.Provide(
+		newPool,
+		postgres.NewWalletRepository,
+		postgres.NewWagerProcessor,
+	),
 )
 
 // newPool opens the pool and registers its shutdown with the lifecycle.
@@ -41,22 +41,22 @@ var PersistenceModule = fx.Module("persistence",
 // that uses it has stopped. That ordering comes from the dependency graph,
 // not from a manual list.
 func newPool(lc fx.Lifecycle, cfg config.Config) (*postgres.Pool, error) {
-      pool, err := postgres.NewPool(context.Background(), postgres.PoolConfig{
-              DSN:            cfg.DatabaseURL,
-              MaxConns:       cfg.PoolMaxConns,
-              AcquireTimeout: cfg.AcquireTimeout,
-      })
-      if err != nil {
-              return nil, err
-      }
+	pool, err := postgres.NewPool(context.Background(), postgres.PoolConfig{
+		DSN:            cfg.DatabaseURL,
+		MaxConns:       cfg.PoolMaxConns,
+		AcquireTimeout: cfg.AcquireTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
 
-      lc.Append(fx.Hook{
-              OnStop: func(context.Context) error {
-                      pool.Close()
-                      return nil
-              },
-      })
-      return pool, nil
+	lc.Append(fx.Hook{
+		OnStop: func(context.Context) error {
+			pool.Close()
+			return nil
+		},
+	})
+	return pool, nil
 }
 
 func requirePool(*postgres.Pool) {}

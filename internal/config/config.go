@@ -12,10 +12,11 @@ var ErrMissingDatabaseURL = errors.New("config: DATABASE_URL is required")
 
 // Config holds everything the process needs from its environment.
 type Config struct {
-	DatabaseURL    string
-	HTTPAddr       string
-	PoolMaxConns   int32
-	AcquireTimeout time.Duration
+	DatabaseURL     string
+	HTTPAddr        string
+	PoolMaxConns    int32
+	AcquireTimeout  time.Duration
+	ShutdownTimeout time.Duration
 }
 
 // Lookup has the same shape as os.LookupEnv. Taking it as a parameter keeps
@@ -31,10 +32,11 @@ func Load(lookup Lookup) (Config, error) {
 	}
 
 	cfg := Config{
-		DatabaseURL:    dsn,
-		HTTPAddr:       ":8080",
-		PoolMaxConns:   10,
-		AcquireTimeout: 5 * time.Second,
+		DatabaseURL:     dsn,
+		HTTPAddr:        ":8080",
+		PoolMaxConns:    10,
+		AcquireTimeout:  5 * time.Second,
+		ShutdownTimeout: 10 * time.Second,
 	}
 
 	if raw, ok := lookup("HTTP_ADDR"); ok && raw != "" {
@@ -57,13 +59,13 @@ func Load(lookup Lookup) (Config, error) {
 		cfg.AcquireTimeout = d
 	}
 
+	if raw, ok := lookup("SHUTDOWN_TIMEOUT"); ok {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("config: SHUTDOWN_TIMEOUT must be a positive duration, got %q", raw)
+		}
+		cfg.ShutdownTimeout = d
+	}
+
 	return cfg, nil
 }
-
-
-// Explicação
-
-// - Load recebe o Lookup em vez de chamar os.LookupEnv direto. Assim o teste controla o ambiente sem tocar nas variáveis reais do processo. É o mesmo motivo de injetar dependências por construtor.
-// - Os padrões ficam em um único lugar. Quem lê Load sabe o valor efetivo de cada variável.
-// - DATABASE_URL é obrigatória e sem ela o processo nem sobe. DB_MAX_CONNS e DB_ACQUIRE_TIMEOUT são validadas: 0 ou texto inválido vira erro no startup, não um pool com comportamento estranho.
-// - int32 no ParseInt com bitSize 32 evita overflow silencioso ao converter para o tipo que o pgxpool espera.
