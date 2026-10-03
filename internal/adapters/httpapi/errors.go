@@ -46,6 +46,7 @@ func statusFor(err error) (int, string) {
 
 	case errors.Is(err, errNotFound),
 		errors.Is(err, postgres.ErrWalletNotFound),
+		errors.Is(err, postgres.ErrWalletOwnerMismatch),
 		errors.Is(err, postgres.ErrWagerNotFound):
 		return http.StatusNotFound, "not_found"
 

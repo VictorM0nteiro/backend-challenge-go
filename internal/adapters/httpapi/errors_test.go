@@ -23,6 +23,7 @@ func TestStatusFor(t *testing.T) {
 		{"sem cabecalho de provedor", errUnauthenticated, 401, "unauthenticated"},
 		{"carteira inexistente", postgres.ErrWalletNotFound, 404, "not_found"},
 		{"operacao de outro provedor", errNotFound, 404, "not_found"},
+		{"jogador nao e dono da carteira", postgres.ErrWalletOwnerMismatch, 404, "not_found"},
 		{"chave reutilizada com corpo diferente", postgres.ErrIdempotencyKeyReuse, 422, "idempotency_key_reused"},
 		{"chave ainda em processamento", postgres.ErrRequestInFlight, 409, "request_in_flight"},
 		{"carteira ja existe", postgres.ErrWalletAlreadyExists, 409, "conflict"},

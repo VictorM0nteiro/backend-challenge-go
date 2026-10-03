@@ -215,19 +215,13 @@ Outras exigências do enunciado não atendidas:
 | `OPENING` sem provedor, ID externo, chave e hash (§6.3) | desvio: a linha usa o provedor `internal`, o identificador `opening:{walletId}` e chave e hash vazios. A unicidade `(provider_id, external_transaction_id)` impede crédito inicial duplicado |
 | Estado `FAILED` para falha permanente de infraestrutura (§6.3) | existe no domínio, nunca é gravado |
 | Moeda validada contra a lista ISO 4217 (§6.1) | só o formato (três letras maiúsculas) é validado |
-| Carteiras distintas em paralelo (§13.3) | sem teste; decorre do lock por linha |
 | Interrupção entre commit e remoção da mensagem (§13.5) | sem teste de interrupção; a reentrega da mesma mensagem é testada |
 | Reinício da aplicação preservando idempotência (§13.8) | sem teste; as chaves estão no banco |
-| Conferência de saldo contra a soma do ledger ao fim dos testes (§13) | não feita |
 | Credencial expirada contra o IdP real (§13) | testada só com token assinado no próprio teste |
 | Instruções para múltiplas instâncias e simulação de falhas (§15) | não escritas, porque os cenários não foram executados |
 
 Defeitos conhecidos:
 
-- **Jogador não é conferido contra a carteira.** O processador trava a carteira pelo
-  `walletId` e não verifica se o `playerId` da requisição é o dono dela. Um provedor
-  autenticado pode movimentar uma carteira informando outro jogador, e o valor errado fica
-  gravado na operação. É a lacuna de integridade mais séria desta entrega.
 - **Mesma operação com outra chave.** Reenviar o mesmo `(providerId,
   externalTransactionId)` com uma chave de idempotência diferente não reaplica o efeito (a
   constraint `UNIQUE` barra e a transação é desfeita), mas a resposta é um 500 genérico em
@@ -245,12 +239,12 @@ apontar onde está a evidência e onde ela falta.
 
 | Critério (pontos) | Feito | Não feito |
 |---|---|---|
-| **Integridade financeira (20)** | `Money` em `int64`, sem float, com overflow tratado; saldo não negativo por `CHECK`; ledger imutável por trigger; lançamento validado (`balanceAfter = balanceBefore ± valor`); reversões com valor igual, mesma rodada e no máximo uma bem-sucedida; códigos distintos para falta de saldo em aposta e em reversão | reconciliação; conferência jogador × carteira; validação da referência de `WIN` |
-| **Concorrência (20)** | `SELECT ... FOR UPDATE` por carteira, sem lock global; versão como segunda barreira; teste obrigatório 100 / 80 / 80 repetido 100 vezes com `-race`; estado todo no banco, nada em memória do processo | prova com três processos independentes; teste de carteiras distintas em paralelo |
+| **Integridade financeira (20)** | `Money` em `int64`, sem float, com overflow tratado; saldo não negativo por `CHECK`; ledger imutável por trigger; lançamento validado (`balanceAfter = balanceBefore ± valor`); reversões com valor igual, mesma rodada e no máximo uma bem-sucedida; jogador conferido contra o dono da carteira; saldo conferido contra o ledger nos testes de integração; códigos distintos para falta de saldo em aposta e em reversão | reconciliação (o endpoint); validação da referência de `WIN` |
+| **Concorrência (20)** | `SELECT ... FOR UPDATE` por carteira, sem lock global; versão como segunda barreira; teste obrigatório 100 / 80 / 80 repetido 100 vezes com `-race`; estado todo no banco, nada em memória do processo | prova com três processos independentes |
 | **Idempotência (15)** | chave persistida na mesma transação do efeito; conflito por hash (422); replay com o saldo original; hash canônico igual entre HTTP e SQS; rejeição de negócio também reproduzida; teste com 50 requisições simultâneas e teste cruzando HTTP e SQS | resposta de conflito para a mesma operação com outra chave (hoje 500); teste de reinício |
 | **Mensageria e recuperação (15)** | inbox na mesma transação, com hash; remoção só após o commit; backoff por visibility timeout; DLQ com redrive, testada; liberação da mensagem no `SIGTERM` | publisher da outbox; eventos das operações de provedor; envelope de evento; worker de `PENDING_REFERENCE`; testes de interrupção |
 | **Modelagem e arquitetura (10)** | entidades com estado privado, construtores com validação, criação separada de reidratação, erros com `errors.Is`; domínio sem dependência de infraestrutura; Fx com módulos, `Provide`, `Invoke` e `Lifecycle`; provedor definido pelo token, rotas internas por role | caso de uso dentro do adapter Postgres, sem porta; controle de acesso à fila |
-| **Testes (10)** | Postgres, Keycloak e LocalStack reais; isolamento entre provedores em envio e consulta; token ausente, inválido, de outro emissor e com algoritmo errado; composição e ciclo de vida do Fx | interrupção e reinício; três instâncias; publishers concorrentes; reversão antes da referência com resolução posterior |
+| **Testes (10)** | Postgres, Keycloak e LocalStack reais; isolamento entre provedores em envio e consulta; carteiras distintas em paralelo e uma carteira ocupada que não bloqueia outra; token ausente, inválido, de outro emissor e com algoritmo errado; composição e ciclo de vida do Fx | interrupção e reinício; três instâncias; publishers concorrentes; reversão antes da referência com resolução posterior |
 | **Observabilidade (5)** | `/health/live`; `/health/ready` com banco e fila; logs em JSON; logs do consumidor com `messageId` | identificadores de correlação nos logs; métricas; log de acesso HTTP |
 | **Documentação (5)** | `docker compose up --build` a partir de checkout limpo; IdP, filas e migrations provisionados; `.env.example`; decisões e lacunas neste arquivo | instruções de múltiplas instâncias e simulação de falhas |
 
@@ -259,7 +253,7 @@ Condições eliminatórias (§14):
 | Condição | Situação |
 |---|---|
 | Autenticação efetiva nos endpoints de negócio | atendida |
-| Acesso não autorizado a operações ou transações | atendida entre provedores; ver o defeito "jogador não é conferido contra a carteira" |
+| Acesso não autorizado a operações ou transações | atendida entre provedores, e o jogador informado precisa ser o dono da carteira |
 | Cálculo monetário em ponto flutuante | não ocorre |
 | Saldo negativo por concorrência | impedido por lock e por `CHECK` |
 | Movimentação duplicada | impedida por chave, inbox e constraints |
@@ -279,3 +273,19 @@ Condições eliminatórias (§14):
   segundo e o readiness passa a 503.
 - **Keycloak fora:** tokens já validados continuam aceitos enquanto as chaves estiverem em
   cache; chaves novas não são obtidas.
+
+## 13. Teste de carga
+
+Diferencial opcional (§14). Método, ambiente e resultados completos em
+[docs/loadtest.md](docs/loadtest.md); relatórios JSON em `docs/bench/`. Resumo, com 32
+clientes por 60 s na máquina de desenvolvimento, gerador e serviços juntos:
+
+| Cenário | RPS | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|
+| 50 carteiras | 2.523 | 12 ms | 17,9 ms | 23 ms |
+| 1 carteira | 462 | 62,4 ms | 114,2 ms | 145,6 ms |
+
+Carteiras independentes escalam; a mesma carteira serializa pelo `FOR UPDATE`. O saldo bateu
+com as operações confirmadas em todas as rodadas e não houve erro de transporte. Não foram
+medidos: atraso da outbox (sem publisher), conflitos forçados, múltiplas instâncias e
+variação estatística entre rodadas.

@@ -6,8 +6,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/domain"
 )
@@ -55,10 +57,50 @@ func balanceOf(t *testing.T, pool *Pool, walletID uuid.UUID) int64 {
 	return w.Balance().AmountMinor()
 }
 
+// ownerOf returns the player that owns the wallet. The processor refuses an
+// operation naming anyone else, so requests must carry the real owner.
+func ownerOf(t *testing.T, pool *Pool, walletID uuid.UUID) uuid.UUID {
+	t.Helper()
+	w, err := NewWalletRepository(pool).FindByID(context.Background(), walletID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	return w.PlayerID()
+}
+
+// assertLedgerMatchesBalance checks the stored balance against the ledger: the
+// balance before the first entry, plus credits, minus debits, must equal the
+// stored balance. (The first entry's balance_before is the starting point
+// because test wallets are created with a balance and no OPENING line.)
+func assertLedgerMatchesBalance(t *testing.T, pool *Pool, walletID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+
+	var start, net int64
+	err := pool.QueryRow(ctx, `
+		SELECT balance_before_minor FROM wallet_ledger_entries
+		WHERE wallet_id = $1 ORDER BY created_at ASC LIMIT 1`, walletID).Scan(&start)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return // no movements: nothing to reconcile
+	}
+	if err != nil {
+		t.Fatalf("first ledger entry: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(CASE direction WHEN 'CREDIT' THEN amount_minor ELSE -amount_minor END), 0)
+		FROM wallet_ledger_entries WHERE wallet_id = $1`, walletID).Scan(&net); err != nil {
+		t.Fatalf("ledger net: %v", err)
+	}
+
+	if stored := balanceOf(t, pool, walletID); stored != start+net {
+		t.Fatalf("stored balance %d, ledger says %d (start %d, net %d)", stored, start+net, start, net)
+	}
+}
+
 func TestProcess_NewBetIsProcessedAndDebits(t *testing.T) {
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
-	player := uuid.New()
+	player := ownerOf(t, pool, walletID)
 	proc := NewWagerProcessor(pool)
 
 	out, err := proc.Process(context.Background(), wagerReq(t, walletID, player, domain.WagerKindBet, "bet-1", "", 2500, "k-1"))
@@ -77,12 +119,13 @@ func TestProcess_NewBetIsProcessedAndDebits(t *testing.T) {
 	if got := countRows(t, pool, "wallet_ledger_entries", walletID); got != 1 {
 		t.Fatalf("ledger rows = %d, want 1", got)
 	}
+	assertLedgerMatchesBalance(t, pool, walletID)
 }
 
 func TestProcess_ReplayReturnsSameOutcomeWithoutSecondDebit(t *testing.T) {
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
-	req := wagerReq(t, walletID, uuid.New(), domain.WagerKindBet, "bet-1", "", 2500, "k-1")
+	req := wagerReq(t, walletID, ownerOf(t, pool, walletID), domain.WagerKindBet, "bet-1", "", 2500, "k-1")
 	proc := NewWagerProcessor(pool)
 
 	first, err := proc.Process(context.Background(), req)
@@ -109,12 +152,13 @@ func TestProcess_ReplayReturnsSameOutcomeWithoutSecondDebit(t *testing.T) {
 	if got := countRows(t, pool, "wallet_ledger_entries", walletID); got != 1 {
 		t.Fatalf("ledger rows = %d, want 1", got)
 	}
+	assertLedgerMatchesBalance(t, pool, walletID)
 }
 
 func TestProcess_SameKeyDifferentBodyIsRejected(t *testing.T) {
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
-	player := uuid.New()
+	player := ownerOf(t, pool, walletID)
 	proc := NewWagerProcessor(pool)
 
 	if _, err := proc.Process(context.Background(), wagerReq(t, walletID, player, domain.WagerKindBet, "bet-1", "", 2500, "k-1")); err != nil {
@@ -132,7 +176,7 @@ func TestProcess_SameKeyDifferentBodyIsRejected(t *testing.T) {
 func TestProcess_InFlightKeyIsRejected(t *testing.T) {
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
-	req := wagerReq(t, walletID, uuid.New(), domain.WagerKindBet, "bet-1", "", 2500, "k-1")
+	req := wagerReq(t, walletID, ownerOf(t, pool, walletID), domain.WagerKindBet, "bet-1", "", 2500, "k-1")
 
 	if _, err := pool.Exec(context.Background(),
 		`INSERT INTO idempotency_keys (scope, endpoint, key, request_hash, state) VALUES ($1, $2, $3, $4, 'in_flight')`,
@@ -152,7 +196,7 @@ func TestProcess_InFlightKeyIsRejected(t *testing.T) {
 func TestProcess_InsufficientFundsIsRecordedAndReplayed(t *testing.T) {
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 1000)
-	req := wagerReq(t, walletID, uuid.New(), domain.WagerKindBet, "bet-1", "", 2500, "k-1")
+	req := wagerReq(t, walletID, ownerOf(t, pool, walletID), domain.WagerKindBet, "bet-1", "", 2500, "k-1")
 	proc := NewWagerProcessor(pool)
 
 	first, err := proc.Process(context.Background(), req)
@@ -181,7 +225,7 @@ func TestProcess_InsufficientFundsIsRecordedAndReplayed(t *testing.T) {
 func TestProcess_RefundReversesProcessedBet(t *testing.T) {
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
-	player := uuid.New()
+	player := ownerOf(t, pool, walletID)
 	proc := NewWagerProcessor(pool)
 	ctx := context.Background()
 
@@ -201,12 +245,13 @@ func TestProcess_RefundReversesProcessedBet(t *testing.T) {
 	if got := countRows(t, pool, "wallet_ledger_entries", walletID); got != 2 {
 		t.Fatalf("ledger rows = %d, want 2 (debit then credit)", got)
 	}
+	assertLedgerMatchesBalance(t, pool, walletID)
 }
 
 func TestProcess_SecondReversalOfSameBetIsDuplicate(t *testing.T) {
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
-	player := uuid.New()
+	player := ownerOf(t, pool, walletID)
 	proc := NewWagerProcessor(pool)
 	ctx := context.Background()
 
@@ -227,6 +272,7 @@ func TestProcess_SecondReversalOfSameBetIsDuplicate(t *testing.T) {
 	if got := balanceOf(t, pool, walletID); got != 10000 {
 		t.Fatalf("balance = %d, want 10000 (money returned only once)", got)
 	}
+	assertLedgerMatchesBalance(t, pool, walletID)
 }
 
 func TestProcess_InvalidInputLeavesNoKeyBehind(t *testing.T) {
@@ -235,7 +281,7 @@ func TestProcess_InvalidInputLeavesNoKeyBehind(t *testing.T) {
 	proc := NewWagerProcessor(pool)
 	ctx := context.Background()
 
-	bad := wagerReq(t, walletID, uuid.New(), domain.WagerKindBet, "bet-1", "", 0, "k-1")
+	bad := wagerReq(t, walletID, ownerOf(t, pool, walletID), domain.WagerKindBet, "bet-1", "", 0, "k-1")
 	if _, err := proc.Process(ctx, bad); !errors.Is(err, domain.ErrInvalidAmount) {
 		t.Fatalf("err = %v, want ErrInvalidAmount", err)
 	}
@@ -255,7 +301,7 @@ func TestProcess_LossInAnotherCurrencyIsRejectedAndLeavesNoKeyBehind(t *testing.
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
 
-	req := wagerReq(t, walletID, uuid.New(), domain.WagerKindLoss, "loss-1", "", 0, "k-loss")
+	req := wagerReq(t, walletID, ownerOf(t, pool, walletID), domain.WagerKindLoss, "loss-1", "", 0, "k-loss")
 	req.Command.Amount = mustMoney(t, 0, "USD")
 
 	_, err := NewWagerProcessor(pool).Process(context.Background(), req)
@@ -276,7 +322,7 @@ func TestProcess_LossInAnotherCurrencyIsRejectedAndLeavesNoKeyBehind(t *testing.
 func TestProcess_ConcurrentSameKeyCreatesOneOperation(t *testing.T) {
 	pool := newTestPool(t)
 	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
-	req := wagerReq(t, walletID, uuid.New(), domain.WagerKindBet, "bet-1", "", 2500, "k-race")
+	req := wagerReq(t, walletID, ownerOf(t, pool, walletID), domain.WagerKindBet, "bet-1", "", 2500, "k-race")
 	proc := NewWagerProcessor(pool)
 
 	const n = 50 // README §13.1: the same bet 50 times in parallel
@@ -315,5 +361,111 @@ func TestProcess_ConcurrentSameKeyCreatesOneOperation(t *testing.T) {
 	}
 	if got := balanceOf(t, pool, walletID); got != 7500 {
 		t.Fatalf("balance = %d, want 7500", got)
+	}
+	assertLedgerMatchesBalance(t, pool, walletID)
+}
+
+// TestProcess_PlayerThatDoesNotOwnTheWalletIsRefused: an operation that names a
+// player other than the wallet's owner must not move money, must leave nothing
+// behind, and must not consume its idempotency key.
+func TestProcess_PlayerThatDoesNotOwnTheWalletIsRefused(t *testing.T) {
+	pool := newTestPool(t)
+	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
+
+	req := wagerReq(t, walletID, uuid.New(), domain.WagerKindBet, "bet-1", "", 2500, "k-stranger")
+	_, err := NewWagerProcessor(pool).Process(context.Background(), req)
+	if !errors.Is(err, ErrWalletOwnerMismatch) {
+		t.Fatalf("err = %v, want ErrWalletOwnerMismatch", err)
+	}
+	if got := balanceOf(t, pool, walletID); got != 10000 {
+		t.Fatalf("balance = %d, want 10000: nothing may move", got)
+	}
+	if got := keyRows(t, pool, "k-stranger"); got != 0 {
+		t.Fatalf("refused operation left %d key row(s) behind", got)
+	}
+	if got := countRows(t, pool, "wager_transactions"); got != 0 {
+		t.Fatalf("wager rows = %d, want 0", got)
+	}
+}
+
+// TestProcess_DistinctWalletsAdvanceInParallel runs one bet per wallet at the
+// same time. Every one must be processed, and each wallet must reconcile.
+func TestProcess_DistinctWalletsAdvanceInParallel(t *testing.T) {
+	pool := newTestPool(t)
+	repo := NewWalletRepository(pool)
+	proc := NewWagerProcessor(pool)
+
+	const wallets = 20
+	ids := make([]uuid.UUID, wallets)
+	for i := range ids {
+		ids[i] = createTestWallet(t, repo, 10000)
+	}
+
+	outcomes := make([]Outcome, wallets)
+	errs := make([]error, wallets)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req := wagerReq(t, ids[i], ownerOf(t, pool, ids[i]), domain.WagerKindBet,
+				"bet-"+ids[i].String(), "", 2500, "k-"+ids[i].String())
+			outcomes[i], errs[i] = proc.Process(context.Background(), req)
+		}()
+	}
+	wg.Wait()
+
+	for i, id := range ids {
+		if errs[i] != nil {
+			t.Fatalf("wallet %d: %v", i, errs[i])
+		}
+		if outcomes[i].StatusCode != statusProcessed {
+			t.Fatalf("wallet %d: status %d, want 201", i, outcomes[i].StatusCode)
+		}
+		if got := balanceOf(t, pool, id); got != 7500 {
+			t.Fatalf("wallet %d: balance %d, want 7500", i, got)
+		}
+		assertLedgerMatchesBalance(t, pool, id)
+	}
+}
+
+// TestProcess_ABusyWalletDoesNotBlockAnotherOne proves there is no global lock:
+// while a transaction holds wallet A's row lock, an operation on wallet B must
+// still finish. Wallet A stays locked for the whole call.
+func TestProcess_ABusyWalletDoesNotBlockAnotherOne(t *testing.T) {
+	pool := newTestPool(t)
+	repo := NewWalletRepository(pool)
+	proc := NewWagerProcessor(pool)
+	ctx := context.Background()
+
+	walletA := createTestWallet(t, repo, 10000)
+	walletB := createTestWallet(t, repo, 10000)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := repo.LockForUpdate(ctx, tx, walletA); err != nil {
+		t.Fatalf("lock A: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		req := wagerReq(t, walletB, ownerOf(t, pool, walletB), domain.WagerKindBet, "bet-b", "", 2500, "k-b")
+		_, err := proc.Process(ctx, req)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("wallet B: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("wallet B was blocked by the lock on wallet A")
+	}
+	if got := balanceOf(t, pool, walletB); got != 7500 {
+		t.Fatalf("wallet B balance = %d, want 7500", got)
 	}
 }

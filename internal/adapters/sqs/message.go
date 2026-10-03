@@ -132,6 +132,7 @@ func isPermanent(err error) bool {
 		postgres.ErrMessageReused,
 		postgres.ErrIdempotencyKeyReuse,
 		postgres.ErrWalletNotFound,
+		postgres.ErrWalletOwnerMismatch,
 		domain.ErrInvalidAmount,
 		domain.ErrInvalidCurrency,
 		domain.ErrCurrencyMismatch,

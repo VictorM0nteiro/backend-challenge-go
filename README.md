@@ -193,6 +193,18 @@ O que cada pacote prova:
 | `internal/adapters/sqs` | consumo real no LocalStack, reentrega, mesma operação por HTTP e SQS, DLQ |
 | `internal/composition` | grafo Fx válido; início, atendimento e encerramento liberando o pool |
 
+## Teste de carga
+
+Com a pilha de pé:
+
+```sh
+go run ./cmd/loadtest -scenario many -wallets 50 -workers 32 -duration 60s
+go run ./cmd/loadtest -scenario single -workers 32 -duration 60s
+```
+
+Metodologia, ambiente e resultados em [docs/loadtest.md](docs/loadtest.md). Os relatórios
+JSON ficam em `docs/bench/`.
+
 ## Rodar fora do container
 
 ```sh

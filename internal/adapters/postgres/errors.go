@@ -10,6 +10,9 @@ var (
 	ErrRequestInFlight       = errors.New("postgres: a request with this idempotency key is still in flight")
 	ErrWalletAlreadyExists   = errors.New("postgres: wallet already exists for this player and currency")
 	ErrWagerNotFound         = errors.New("postgres: wager transaction not found")
+	// ErrWalletOwnerMismatch: the operation names a player who does not own the
+	// wallet. Callers answer it like a missing wallet, so it reveals nothing.
+	ErrWalletOwnerMismatch = errors.New("postgres: wallet does not belong to this player")
 )
 
 // Explicação

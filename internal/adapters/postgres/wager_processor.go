@@ -294,6 +294,12 @@ func (p *WagerProcessor) execute(ctx context.Context, tx pgx.Tx, req WagerReques
 	if err != nil {
 		return Outcome{}, err
 	}
+	// The wallet is locked, so its owner cannot change under us. An operation
+	// that names another player is refused before any money moves, and the
+	// error rolls the whole transaction back, key claim included.
+	if wallet.PlayerID() != wt.PlayerID() {
+		return Outcome{}, ErrWalletOwnerMismatch
+	}
 	previousVersion := wallet.Version()
 
 	entry, err := p.settle(ctx, tx, wt, wallet)
