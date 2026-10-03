@@ -19,6 +19,8 @@ import (
 func TestLifecycle_StartServeStopReleasesResources(t *testing.T) {
 	t.Setenv("DATABASE_URL", testutil.StartPostgres(t))
 	t.Setenv("HTTP_ADDR", "127.0.0.1:0")
+	t.Setenv("AUTH_ISSUER", "http://localhost:1/realms/wallet")
+	t.Setenv("AUTH_JWKS_URL", "http://localhost:1/realms/wallet/protocol/openid-connect/certs")
 
 	var (
 		server *HTTPServer

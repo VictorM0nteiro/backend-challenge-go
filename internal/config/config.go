@@ -7,8 +7,14 @@ import (
 	"time"
 )
 
-// ErrMissingDatabaseURL is returned when DATABASE_URL is absent or empty.
-var ErrMissingDatabaseURL = errors.New("config: DATABASE_URL is required")
+var (
+	// ErrMissingDatabaseURL is returned when DATABASE_URL is absent or empty.
+	ErrMissingDatabaseURL = errors.New("config: DATABASE_URL is required")
+	// ErrMissingAuthIssuer is returned when AUTH_ISSUER is absent or empty.
+	ErrMissingAuthIssuer = errors.New("config: AUTH_ISSUER is required")
+	// ErrMissingAuthJWKSURL is returned when AUTH_JWKS_URL is absent or empty.
+	ErrMissingAuthJWKSURL = errors.New("config: AUTH_JWKS_URL is required")
+)
 
 // Config holds everything the process needs from its environment.
 type Config struct {
@@ -17,6 +23,11 @@ type Config struct {
 	PoolMaxConns    int32
 	AcquireTimeout  time.Duration
 	ShutdownTimeout time.Duration
+	// AuthIssuer is the iss claim every accepted token must carry.
+	AuthIssuer string
+	// AuthJWKSURL is where the public keys are fetched. It can differ from the
+	// issuer, for example an internal network address inside Docker.
+	AuthJWKSURL string
 }
 
 // Lookup has the same shape as os.LookupEnv. Taking it as a parameter keeps
@@ -31,12 +42,24 @@ func Load(lookup Lookup) (Config, error) {
 		return Config{}, ErrMissingDatabaseURL
 	}
 
+	issuer, ok := lookup("AUTH_ISSUER")
+	if !ok || issuer == "" {
+		return Config{}, ErrMissingAuthIssuer
+	}
+
+	jwksURL, ok := lookup("AUTH_JWKS_URL")
+	if !ok || jwksURL == "" {
+		return Config{}, ErrMissingAuthJWKSURL
+	}
+
 	cfg := Config{
 		DatabaseURL:     dsn,
 		HTTPAddr:        ":8080",
 		PoolMaxConns:    10,
 		AcquireTimeout:  5 * time.Second,
 		ShutdownTimeout: 10 * time.Second,
+		AuthIssuer:      issuer,
+		AuthJWKSURL:     jwksURL,
 	}
 
 	if raw, ok := lookup("HTTP_ADDR"); ok && raw != "" {

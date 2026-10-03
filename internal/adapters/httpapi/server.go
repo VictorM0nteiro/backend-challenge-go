@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/VictorM0nteiro/backend-challenge-go/internal/adapters/postgres"
 	"github.com/google/uuid"
+
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/adapters/postgres"
 )
 
 const (
-	headerProvider       = "X-provider-ID"
 	headerIdempotencyKey = "Idempotency-Key"
 	maxIdempotencyKeyLen = 255
 	maxBodyBytes         = 64 << 10
@@ -24,20 +24,28 @@ type Server struct {
 	wallets   *postgres.WalletRepository
 	wagers    *postgres.WagerReader
 	processor *postgres.WagerProcessor
+	auth      *Authenticator
 }
 
-func NewServer(pool *postgres.Pool, wallets *postgres.WalletRepository, wagers *postgres.WagerReader, processor *postgres.WagerProcessor) *Server {
-	return &Server{pool: pool, wallets: wallets, wagers: wagers, processor: processor}
+// NewServer wires the handlers to the adapters they need.
+func NewServer(
+	pool *postgres.Pool,
+	wallets *postgres.WalletRepository,
+	wagers *postgres.WagerReader,
+	processor *postgres.WagerProcessor,
+	auth *Authenticator,
+) *Server {
+	return &Server{pool: pool, wallets: wallets, wagers: wagers, processor: processor, auth: auth}
 }
 
-// Handler returns the routes. Go 1.22 patterns put the method in the route, so
-// a wrong method gets 405 from the mux and never reaches a handler.
+// Handler returns the routes. Each business route is wrapped by the guard that
+// matches who may call it. Health checks stay public.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /wallets", handle(s.openWallet))
-	mux.HandleFunc("GET /wallets/{walletId}", handle(s.getWallet))
-	mux.HandleFunc("POST /wagering/transactions", handle(s.submitWager))
-	mux.HandleFunc("GET /wagering/transactions/{transactionId}", handle(s.getWager))
+	mux.Handle("POST /wallets", s.auth.Internal(handle(s.openWallet)))
+	mux.Handle("GET /wallets/{walletId}", s.auth.Internal(handle(s.getWallet)))
+	mux.Handle("POST /wagering/transactions", s.auth.Provider(handle(s.submitWager)))
+	mux.Handle("GET /wagering/transactions/{transactionId}", s.auth.Provider(handle(s.getWager)))
 	mux.HandleFunc("GET /health/live", handle(s.live))
 	mux.HandleFunc("GET /health/ready", handle(s.ready))
 	return mux
@@ -55,14 +63,15 @@ func handle(h handler) http.HandlerFunc {
 	}
 }
 
-// providerFrom returns the caller's provider. Until the auth step, the header
-// is trusted. The auth step replaces this function and nothing else.
+// providerFrom returns the provider the request was authenticated as. The guard
+// stores it in the context before the handler runs, so the value cannot come
+// from a header the caller controls.
 func providerFrom(r *http.Request) (string, error) {
-	provider := r.Header.Get(headerProvider)
-	if provider == "" {
+	p, ok := principalFrom(r.Context())
+	if !ok || p.ClientID == "" {
 		return "", errUnauthenticated
 	}
-	return provider, nil
+	return p.ClientID, nil
 }
 
 // decodeJSON reads one JSON object into dst. Unknown fields and oversized

@@ -10,17 +10,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
+
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/adapters/postgres"
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/testutil"
 )
 
-const testPlayerID = "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1"
+const (
+	testPlayerID = "0192f28f-5dc0-7d58-bdb2-814ad6a0f4a1"
+	wagersURL    = "/wagering/transactions"
+)
 
-// newTestAPI starts a real Postgres, a real pool and the real routes, and
-// returns the base URL of the server.
+// newTestAPI starts a real Postgres, a real pool, the real routes, and an
+// authenticator bound to the Keycloak from TestMain. It returns the base URL.
 func newTestAPI(t *testing.T) string {
 	t.Helper()
-	pool, err := postgres.NewPool(context.Background(), postgres.PoolConfig{
+	ctx := context.Background()
+
+	pool, err := postgres.NewPool(ctx, postgres.PoolConfig{
 		DSN:            testutil.StartPostgres(t),
 		MaxConns:       5,
 		AcquireTimeout: 5 * time.Second,
@@ -30,10 +37,12 @@ func newTestAPI(t *testing.T) string {
 	}
 	t.Cleanup(pool.Close)
 
+	auth := NewAuthenticator(testKeycloak.Issuer, oidc.NewRemoteKeySet(ctx, testKeycloak.JWKSURL()))
 	api := NewServer(pool,
 		postgres.NewWalletRepository(pool),
 		postgres.NewWagerReader(pool),
 		postgres.NewWagerProcessor(pool),
+		auth,
 	)
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
@@ -79,10 +88,22 @@ func errorCode(out map[string]any) string {
 	return code
 }
 
-// openWallet opens a BRL wallet for testPlayerID and returns its id.
+// bearer returns the Authorization header for a client's real token.
+func bearer(client string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + testTokens[client]}
+}
+
+// wagerHeaders is what a provider sends for one operation.
+func wagerHeaders(provider, key string) map[string]string {
+	h := bearer(provider)
+	h["Idempotency-Key"] = key
+	return h
+}
+
+// openWallet opens a BRL wallet for testPlayerID as the internal service.
 func openWallet(t *testing.T, base, amount string) string {
 	t.Helper()
-	status, out := call(t, http.MethodPost, base+"/wallets", nil, map[string]any{
+	status, out := call(t, http.MethodPost, base+"/wallets", bearer("wallet-service"), map[string]any{
 		"playerId":       testPlayerID,
 		"initialBalance": map[string]string{"amount": amount, "currency": "BRL"},
 	})
@@ -106,12 +127,6 @@ func wagerBody(walletID, externalID, kind, amount string) map[string]any {
 	}
 }
 
-func wagerHeaders(provider, key string) map[string]string {
-	return map[string]string{"X-Provider-ID": provider, "Idempotency-Key": key}
-}
-
-const wagersURL = "/wagering/transactions"
-
 func TestOpenWallet_ZeroThenDuplicateIsConflict(t *testing.T) {
 	base := newTestAPI(t)
 	body := map[string]any{
@@ -119,12 +134,22 @@ func TestOpenWallet_ZeroThenDuplicateIsConflict(t *testing.T) {
 		"initialBalance": map[string]string{"amount": "0", "currency": "BRL"},
 	}
 
-	if status, out := call(t, http.MethodPost, base+"/wallets", nil, body); status != http.StatusCreated {
+	if status, out := call(t, http.MethodPost, base+"/wallets", bearer("wallet-service"), body); status != http.StatusCreated {
 		t.Fatalf("first open: status %d, body %v", status, out)
 	}
-	status, out := call(t, http.MethodPost, base+"/wallets", nil, body)
+	status, out := call(t, http.MethodPost, base+"/wallets", bearer("wallet-service"), body)
 	if status != http.StatusConflict || errorCode(out) != "conflict" {
 		t.Fatalf("duplicate open: status %d code %q, want 409 conflict", status, errorCode(out))
+	}
+}
+
+func TestWallets_NoTokenIs401(t *testing.T) {
+	base := newTestAPI(t)
+	walletID := openWallet(t, base, "10.00")
+
+	status, out := call(t, http.MethodGet, base+"/wallets/"+walletID, nil, nil)
+	if status != http.StatusUnauthorized || errorCode(out) != "unauthenticated" {
+		t.Fatalf("status %d code %q, want 401 unauthenticated", status, errorCode(out))
 	}
 }
 
@@ -185,10 +210,11 @@ func TestSubmitWager_InsufficientFundsIsARecordedRejectionNotAnError(t *testing.
 	}
 }
 
-func TestSubmitWager_ProviderMismatchIs404(t *testing.T) {
+func TestSubmitWager_OtherProviderIsNotFound(t *testing.T) {
 	base := newTestAPI(t)
 	walletID := openWallet(t, base, "1000.00")
 
+	// provider-b is authenticated, but the body names provider-a.
 	status, out := call(t, http.MethodPost, base+wagersURL,
 		wagerHeaders("provider-b", "k-other"), wagerBody(walletID, "t-1", "BET", "25.00"))
 	if status != http.StatusNotFound || errorCode(out) != "not_found" {
@@ -207,8 +233,8 @@ func TestSubmitWager_BadRequestsLeaveNoKeyBehind(t *testing.T) {
 		status  int
 		code    string
 	}{
-		{"sem Idempotency-Key", map[string]string{"X-Provider-ID": "provider-a"}, wagerBody(walletID, "t-1", "BET", "25.00"), 400, "invalid_request"},
-		{"sem X-Provider-ID", map[string]string{"Idempotency-Key": "k-x"}, wagerBody(walletID, "t-1", "BET", "25.00"), 401, "unauthenticated"},
+		{"sem Idempotency-Key", bearer("provider-a"), wagerBody(walletID, "t-1", "BET", "25.00"), 400, "invalid_request"},
+		{"sem token", map[string]string{"Idempotency-Key": "k-x"}, wagerBody(walletID, "t-1", "BET", "25.00"), 401, "unauthenticated"},
 		{"valor com tres casas", wagerHeaders("provider-a", "k-bad"), wagerBody(walletID, "t-2", "BET", "25.001"), 400, "invalid_request"},
 		{"OPENING vindo de fora", wagerHeaders("provider-a", "k-bad"), wagerBody(walletID, "t-3", "OPENING", "25.00"), 400, "invalid_request"},
 	}
@@ -221,8 +247,8 @@ func TestSubmitWager_BadRequestsLeaveNoKeyBehind(t *testing.T) {
 		})
 	}
 
-	// The rejected attempts used the key "k-bad". It must still be free, because
-	// a failed input rolls back its own key claim.
+	// The rejected attempts used "k-bad". It must still be free, because a
+	// failed input rolls back its own key claim.
 	status, out := call(t, http.MethodPost, base+wagersURL,
 		wagerHeaders("provider-a", "k-bad"), wagerBody(walletID, "t-ok", "BET", "25.00"))
 	if status != http.StatusCreated {
@@ -238,12 +264,12 @@ func TestGetWager_OnlyTheOwnerProviderSeesIt(t *testing.T) {
 		wagerHeaders("provider-a", "k-get"), wagerBody(walletID, "t-get", "BET", "25.00"))
 	url := base + wagersURL + "/" + created["transactionId"].(string)
 
-	status, out := call(t, http.MethodGet, url, map[string]string{"X-Provider-ID": "provider-a"}, nil)
+	status, out := call(t, http.MethodGet, url, bearer("provider-a"), nil)
 	if status != http.StatusOK || out["status"] != "PROCESSED" {
 		t.Fatalf("owner: status %d body %v", status, out)
 	}
 
-	status, out = call(t, http.MethodGet, url, map[string]string{"X-Provider-ID": "provider-b"}, nil)
+	status, out = call(t, http.MethodGet, url, bearer("provider-b"), nil)
 	if status != http.StatusNotFound || errorCode(out) != "not_found" {
 		t.Fatalf("other provider: status %d code %q, want 404", status, errorCode(out))
 	}
@@ -257,9 +283,3 @@ func TestHealth_LiveAndReadyAnswer200WhileDatabaseIsUp(t *testing.T) {
 		}
 	}
 }
-
-// Explicação
-
-// - newTestAPI monta a mesma composição que o Fx vai montar: pool real, repositórios reais e rotas reais. O teste não usa mock de banco, o que atende a regra do README §13.
-// - TestSubmitWager_BadRequestsLeaveNoKeyBehind mostra a propriedade mais sutil da idempotência. Uma entrada inválida não pode consumir a chave. Por isso o último passo reutiliza k-bad e espera 201.
-// - O teste de insufficient_funds garante a separação de contratos: a rejeição de negócio vem com corpo REJECTED, sem o envelope error. Cliente que lê error.code não confunde as duas situações.

@@ -15,8 +15,9 @@ import (
 // errors keep their own sentinels.
 var (
 	errInvalidRequest  = errors.New("invalid request")
-	errUnauthenticated = errors.New("missing X-Provider-ID header")
+	errUnauthenticated = errors.New("missing or invalid bearer token")
 	errNotFound        = errors.New("not found")
+	errForbidden       = errors.New("forbidden")
 )
 
 type errorDetail struct {
@@ -63,6 +64,9 @@ func statusFor(err error) (int, string) {
 
 	case errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable, "temporarily_unavailable"
+
+	case errors.Is(err, errForbidden):
+		return http.StatusForbidden, "forbidden"
 
 	default:
 		return http.StatusInternalServerError, "internal"

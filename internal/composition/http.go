@@ -18,6 +18,7 @@ import (
 // accepting after the pool exists, and stops accepting before the pool closes.
 var HTTPModule = fx.Module("httpapi",
 	fx.Provide(
+		newAuthenticator,
 		httpapi.NewServer,
 		newHTTPServer,
 	),
