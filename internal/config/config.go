@@ -14,6 +14,8 @@ var (
 	ErrMissingAuthIssuer = errors.New("config: AUTH_ISSUER is required")
 	// ErrMissingAuthJWKSURL is returned when AUTH_JWKS_URL is absent or empty.
 	ErrMissingAuthJWKSURL = errors.New("config: AUTH_JWKS_URL is required")
+	// ErrMissingSQSQueueURL is returned when SQS_QUEUE_URL is absent or empty.
+	ErrMissingSQSQueueURL = errors.New("config: SQS_QUEUE_URL is required")
 )
 
 // Config holds everything the process needs from its environment.
@@ -28,6 +30,11 @@ type Config struct {
 	// AuthJWKSURL is where the public keys are fetched. It can differ from the
 	// issuer, for example an internal network address inside Docker.
 	AuthJWKSURL string
+	// SQSQueueURL is the FIFO queue the consumer receives from.
+	SQSQueueURL string
+	// SQSEndpoint overrides the SQS endpoint, for LocalStack. Empty means AWS.
+	SQSEndpoint string
+	AWSRegion   string
 }
 
 // Lookup has the same shape as os.LookupEnv. Taking it as a parameter keeps
@@ -52,6 +59,11 @@ func Load(lookup Lookup) (Config, error) {
 		return Config{}, ErrMissingAuthJWKSURL
 	}
 
+	queueURL, ok := lookup("SQS_QUEUE_URL")
+	if !ok || queueURL == "" {
+		return Config{}, ErrMissingSQSQueueURL
+	}
+
 	cfg := Config{
 		DatabaseURL:     dsn,
 		HTTPAddr:        ":8080",
@@ -60,10 +72,20 @@ func Load(lookup Lookup) (Config, error) {
 		ShutdownTimeout: 10 * time.Second,
 		AuthIssuer:      issuer,
 		AuthJWKSURL:     jwksURL,
+		SQSQueueURL:     queueURL,
+		AWSRegion:       "us-east-1",
 	}
 
 	if raw, ok := lookup("HTTP_ADDR"); ok && raw != "" {
 		cfg.HTTPAddr = raw
+	}
+
+	if raw, ok := lookup("SQS_ENDPOINT"); ok {
+		cfg.SQSEndpoint = raw
+	}
+
+	if raw, ok := lookup("AWS_REGION"); ok && raw != "" {
+		cfg.AWSRegion = raw
 	}
 
 	if raw, ok := lookup("DB_MAX_CONNS"); ok {

@@ -34,6 +34,7 @@ type WagerRequest struct {
 	Key         IdempotencyKey
 	RequestHash string
 	Command     domain.WagerCommand
+	Inbox       *InboxMessage
 }
 
 // Outcome is the answer for a request. A first request and every replay of
@@ -56,11 +57,10 @@ func NewWagerProcessor(pool *Pool) *WagerProcessor {
 	return &WagerProcessor{pool: pool, wallets: NewWalletRepository(pool)}
 }
 
-// Process runs one operation inside one transaction: claim the key, lock the
-// wallet, decide the outcome, write the operation, the money movement and the
-// stored response, then commit. A repeated key never reaches the decision
-// step: it gets the stored outcome, or an error if the body differs or the
-// first attempt has not finished.
+// Process runs one operation inside one transaction. The inbox row (when the
+// request is a message) and the idempotency key are claimed first. A first
+// attempt executes; a repeat gets the stored outcome. Everything commits
+// together, or nothing does.
 func (p *WagerProcessor) Process(ctx context.Context, req WagerRequest) (Outcome, error) {
 	ctx, cancel := p.pool.withAcquireTimeout(ctx)
 	defer cancel()
@@ -69,52 +69,37 @@ func (p *WagerProcessor) Process(ctx context.Context, req WagerRequest) (Outcome
 	if err != nil {
 		return Outcome{}, fmt.Errorf("postgres: begin tx: %w", err)
 	}
-	// After a successful Commit this is a no-op; on any error it undoes the
-	// key claim too, so a failed attempt never leaves a key behind.
+	// After a successful Commit this is a no-op. On any error it undoes the
+	// inbox row and the key claim, so a failed attempt leaves nothing behind.
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if req.Inbox != nil {
+		if err := claimInbox(ctx, tx, *req.Inbox); err != nil {
+			return Outcome{}, err
+		}
+	}
 
 	claimed, err := claimKey(ctx, tx, req)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !claimed {
-		return replayKey(ctx, tx, req)
-	}
 
-	wt, err := domain.NewWagerTransaction(req.Command)
+	var outcome Outcome
+	if claimed {
+		outcome, err = p.execute(ctx, tx, req)
+	} else {
+		outcome, err = replayKey(ctx, tx, req)
+	}
 	if err != nil {
 		return Outcome{}, err
 	}
 
-	wallet, err := p.wallets.LockForUpdate(ctx, tx, wt.WalletID())
-	if err != nil {
-		return Outcome{}, err
-	}
-	previousVersion := wallet.Version()
-
-	entry, err := p.settle(ctx, tx, wt, wallet)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if entry != nil {
-		if err := p.wallets.Save(ctx, tx, wallet, previousVersion); err != nil {
+	// A replay also completes the inbox row. Otherwise a message whose operation
+	// was processed through HTTP would never be marked as done here.
+	if req.Inbox != nil {
+		if err := completeInbox(ctx, tx, *req.Inbox); err != nil {
 			return Outcome{}, err
 		}
-		if err := p.wallets.InsertLedgerEntry(ctx, tx, entry); err != nil {
-			return Outcome{}, err
-		}
-	}
-
-	if err := insertWagerTransaction(ctx, tx, wt); err != nil {
-		return Outcome{}, err
-	}
-
-	outcome, err := newOutcome(wt, wallet)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if err := completeKey(ctx, tx, req.Key, outcome); err != nil {
-		return Outcome{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -291,3 +276,51 @@ func completeKey(ctx context.Context, tx pgx.Tx, key IdempotencyKey, out Outcome
 	}
 	return nil
 }
+
+// execute is the work of a first attempt. It runs only for the request that
+// claimed the key: decide the operation, move the money, store the operation
+// and the response.
+func (p *WagerProcessor) execute(ctx context.Context, tx pgx.Tx, req WagerRequest) (Outcome, error) {
+	wt, err := domain.NewWagerTransaction(req.Command)
+	if err != nil {
+		return Outcome{}, err
+	}
+
+	wallet, err := p.wallets.LockForUpdate(ctx, tx, wt.WalletID())
+	if err != nil {
+		return Outcome{}, err
+	}
+	previousVersion := wallet.Version()
+
+	entry, err := p.settle(ctx, tx, wt, wallet)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if entry != nil {
+		if err := p.wallets.Save(ctx, tx, wallet, previousVersion); err != nil {
+			return Outcome{}, err
+		}
+		if err := p.wallets.InsertLedgerEntry(ctx, tx, entry); err != nil {
+			return Outcome{}, err
+		}
+	}
+
+	if err := insertWagerTransaction(ctx, tx, wt); err != nil {
+		return Outcome{}, err
+	}
+
+	outcome, err := newOutcome(wt, wallet)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if err := completeKey(ctx, tx, req.Key, outcome); err != nil {
+		return Outcome{}, err
+	}
+	return outcome, nil
+}
+
+// Explicação
+
+// - A ordem das reivindicações é: inbox, depois chave de idempotência, depois a carteira com FOR UPDATE. Todas dentro da mesma transação.
+// - Antes, a mudança era só a criação do inbox. Mas havia um caminho em que o replay saía sem commit. Como a linha do inbox também fica nessa transação, ela seria desfeita. Por isso Process agora sempre chega ao Commit, seja primeira execução ou replay.
+// - execute é o mesmo corpo que estava dentro de Process, só separado. Os testes existentes do processador continuam valendo porque a regra não mudou.

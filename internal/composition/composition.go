@@ -17,6 +17,7 @@ func Options() []fx.Option {
 		ConfigModule,
 		PersistenceModule,
 		HTTPModule,
+		ConsumerModule,
 		fx.Invoke(requirePool),
 		fx.Invoke(requireServer),
 	}

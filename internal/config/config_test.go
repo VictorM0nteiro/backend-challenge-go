@@ -20,6 +20,7 @@ func validEnv() map[string]string {
 		"DATABASE_URL":  "postgres://x",
 		"AUTH_ISSUER":   "http://localhost:8081/realms/wallet",
 		"AUTH_JWKS_URL": "http://localhost:8081/realms/wallet/protocol/openid-connect/certs",
+		"SQS_QUEUE_URL": "http://localhost:4566/000000000000/wager-transactions.fifo",
 	}
 }
 
@@ -85,6 +86,14 @@ func TestLoad(t *testing.T) {
 		env["SHUTDOWN_TIMEOUT"] = "-1s"
 		if _, err := Load(envOf(env)); err == nil {
 			t.Fatal("negative SHUTDOWN_TIMEOUT must be rejected")
+		}
+	})
+
+	t.Run("sem_sqs_queue_url_falha", func(t *testing.T) {
+		env := validEnv()
+		delete(env, "SQS_QUEUE_URL")
+		if _, err := Load(envOf(env)); !errors.Is(err, ErrMissingSQSQueueURL) {
+			t.Fatalf("err = %v, want ErrMissingSQSQueueURL", err)
 		}
 	})
 }

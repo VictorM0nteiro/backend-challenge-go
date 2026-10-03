@@ -21,6 +21,8 @@ func TestLifecycle_StartServeStopReleasesResources(t *testing.T) {
 	t.Setenv("HTTP_ADDR", "127.0.0.1:0")
 	t.Setenv("AUTH_ISSUER", "http://localhost:1/realms/wallet")
 	t.Setenv("AUTH_JWKS_URL", "http://localhost:1/realms/wallet/protocol/openid-connect/certs")
+	t.Setenv("SQS_QUEUE_URL", "http://localhost:1/000000000000/wager-transactions.fifo")
+	t.Setenv("SQS_ENDPOINT", "http://localhost:1")
 
 	var (
 		server *HTTPServer
