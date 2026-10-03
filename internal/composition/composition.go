@@ -4,18 +4,21 @@ import (
 	"context"
 	"os"
 
+	"go.uber.org/fx"
+
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/adapters/postgres"
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/config"
-	"go.uber.org/fx"
 )
 
-// Options is the whole application graph. main runs it and the test validates
-// it, so both read exactly the same wiring.
+// Options is the whole application graph. main runs it, and the tests validate
+// and start it, so all of them read the same wiring.
 func Options() []fx.Option {
 	return []fx.Option{
 		ConfigModule,
 		PersistenceModule,
+		HTTPModule,
 		fx.Invoke(requirePool),
+		fx.Invoke(requireServer),
 	}
 }
 
@@ -31,15 +34,15 @@ var PersistenceModule = fx.Module("persistence",
 	fx.Provide(
 		newPool,
 		postgres.NewWalletRepository,
+		postgres.NewWagerReader,
 		postgres.NewWagerProcessor,
 	),
 )
 
-// newPool opens the pool and registers its shutdown with the lifecycle.
-// Fx stops hooks in the reverse order they were appended. The pool is built
-// before anything that depends on it, so its hook runs after every component
-// that uses it has stopped. That ordering comes from the dependency graph,
-// not from a manual list.
+// newPool opens the pool and registers its shutdown with the lifecycle. Fx
+// stops hooks in reverse order of registration. The pool is built before the
+// components that use it, so its hook runs after theirs. That order comes from
+// the dependency graph, not from a manual list.
 func newPool(lc fx.Lifecycle, cfg config.Config) (*postgres.Pool, error) {
 	pool, err := postgres.NewPool(context.Background(), postgres.PoolConfig{
 		DSN:            cfg.DatabaseURL,
@@ -59,4 +62,10 @@ func newPool(lc fx.Lifecycle, cfg config.Config) (*postgres.Pool, error) {
 	return pool, nil
 }
 
+// requirePool forces the pool to be built during startup. Without it, nothing
+// would ask for the pool and a bad DSN would only show up on the first request.
 func requirePool(*postgres.Pool) {}
+
+// requireServer forces the HTTP server to be built, so its listener opens and
+// its lifecycle hooks are registered.
+func requireServer(*HTTPServer) {}

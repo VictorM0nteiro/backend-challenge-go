@@ -9,6 +9,7 @@ var (
 	ErrIdempotencyKeyReuse   = errors.New("postgres: idempotency key reused with a different request body")
 	ErrRequestInFlight       = errors.New("postgres: a request with this idempotency key is still in flight")
 	ErrWalletAlreadyExists   = errors.New("postgres: wallet already exists for this player and currency")
+	ErrWagerNotFound         = errors.New("postgres: wager transaction not found")
 )
 
 // Explicação
