@@ -4,6 +4,8 @@ import (
 	"errors"
 	"io/fs"
 	"log"
+	"log/slog"
+	"os"
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/composition"
 	"github.com/joho/godotenv"
@@ -11,13 +13,13 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		log.Fatalf("load .env: %v", err)
 	}
+
+	// Run blocks until SIGINT or SIGTERM, then runs the OnStop hooks in reverse
+	// order: HTTP server, SQS consumer, database pool.
 	fx.New(composition.Options()...).Run()
 }
-
-// Explicação
-
-// - Run bloqueia até receber SIGINT/SIGTERM e então executa os OnStop na ordem certa. Não precisei escrever signal.NotifyContext como no wallet-go, porque o Fx já faz isso.
-// - Como ainda não há servidor, o processo sobe, conecta no banco e fica esperando sinal. Isso é esperado nesta etapa.

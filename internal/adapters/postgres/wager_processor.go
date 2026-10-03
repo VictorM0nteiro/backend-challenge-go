@@ -165,7 +165,11 @@ func (p *WagerProcessor) settle(ctx context.Context, tx pgx.Tx, wt *domain.Wager
 	switch wt.Kind() {
 	case domain.WagerKindLoss:
 		// A LOSS moves no money, so it produces no ledger entry and does not
-		// bump the wallet version. It only records what the balance was.
+		// bump the wallet version. It only records what the balance was. No
+		// movement means Debit and Credit never check the currency, so check it here.
+		if wt.Amount().Currency() != wallet.Currency() {
+			return nil, domain.ErrCurrencyMismatch
+		}
 		return nil, wt.MarkProcessed(wallet.Balance())
 
 	case domain.WagerKindBet:

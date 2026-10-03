@@ -249,6 +249,27 @@ func TestProcess_InvalidInputLeavesNoKeyBehind(t *testing.T) {
 	}
 }
 
+// TestProcess_LossInAnotherCurrencyIsRejectedAndLeavesNoKeyBehind: a LOSS moves
+// no money, so only the processor's own check catches a wrong currency.
+func TestProcess_LossInAnotherCurrencyIsRejectedAndLeavesNoKeyBehind(t *testing.T) {
+	pool := newTestPool(t)
+	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
+
+	req := wagerReq(t, walletID, uuid.New(), domain.WagerKindLoss, "loss-1", "", 0, "k-loss")
+	req.Command.Amount = mustMoney(t, 0, "USD")
+
+	_, err := NewWagerProcessor(pool).Process(context.Background(), req)
+	if !errors.Is(err, domain.ErrCurrencyMismatch) {
+		t.Fatalf("err = %v, want ErrCurrencyMismatch", err)
+	}
+	if got := keyRows(t, pool, "k-loss"); got != 0 {
+		t.Fatalf("rejected input left %d key row(s) behind", got)
+	}
+	if got := countRows(t, pool, "wager_transactions"); got != 0 {
+		t.Fatalf("wager rows = %d, want 0", got)
+	}
+}
+
 // TestProcess_ConcurrentSameKeyCreatesOneOperation is the idempotency race:
 // many simultaneous requests with one key must produce one operation, one
 // debit, and identical answers for everyone.
@@ -258,7 +279,7 @@ func TestProcess_ConcurrentSameKeyCreatesOneOperation(t *testing.T) {
 	req := wagerReq(t, walletID, uuid.New(), domain.WagerKindBet, "bet-1", "", 2500, "k-race")
 	proc := NewWagerProcessor(pool)
 
-	const n = 10
+	const n = 50 // README §13.1: the same bet 50 times in parallel
 	outcomes := make([]Outcome, n)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
