@@ -77,41 +77,43 @@ func (c *Consumer) Run(ctx context.Context) {
 
 // handle applies one message and then settles it: delete it on success, leave
 // it for the redrive policy on a permanent failure, and postpone it with
-// backoff on a transient one.
+// backoff on a transient one. The logs carry the envelope's messageId, which is
+// the identity the inbox uses, and the SQS id, which correlates with AWS.
 func (c *Consumer) handle(ctx context.Context, msg types.Message) {
-	id := aws.ToString(msg.MessageId)
-	err := c.apply(ctx, aws.ToString(msg.Body))
+	env, err := parse(aws.ToString(msg.Body))
+	log := slog.With("sqsMessageId", aws.ToString(msg.MessageId), "messageId", env.MessageID)
+
+	var out postgres.Outcome
+	if err == nil {
+		out, err = c.apply(ctx, env)
+	}
 
 	switch {
 	case err == nil:
 		// Done or rejected by the business rules. Both are terminal outcomes.
+		log.Info("message settled", "status", out.StatusCode, "replayed", out.Replayed)
 		c.delete(ctx, msg)
 	case ctx.Err() != nil:
 		// Shutdown interrupted the work. Make the message visible now so another
 		// instance can take it, instead of waiting for the timeout to run out.
-		slog.Info("shutdown during message, releasing it", "messageId", id)
+		log.Info("shutdown during message, releasing it")
 		c.setVisibility(ctx, msg, 0)
 	case isPermanent(err):
-		slog.Error("permanent failure, message left for the DLQ", "messageId", id, "error", err)
+		log.Error("permanent failure, message left for the DLQ", "error", err)
 	default:
-		slog.Warn("transient failure, retrying with backoff", "messageId", id, "error", err)
+		log.Warn("transient failure, retrying with backoff", "error", err, "receiveCount", receiveCount(msg))
 		c.setVisibility(ctx, msg, retryDelay(receiveCount(msg)))
 	}
 }
 
-// apply parses the message and runs it through the processor. A rejection by
-// the business rules is not an error here: Process returns it as an outcome.
-func (c *Consumer) apply(ctx context.Context, body string) error {
-	env, err := parse(body)
-	if err != nil {
-		return err
-	}
+// apply maps a parsed envelope to the processor's input and runs it. A rejection
+// by the business rules is not an error here: Process returns it as an outcome.
+func (c *Consumer) apply(ctx context.Context, env envelope) (postgres.Outcome, error) {
 	req, err := toRequest(env)
 	if err != nil {
-		return err
+		return postgres.Outcome{}, err
 	}
-	_, err = c.processor.Process(ctx, req)
-	return err
+	return c.processor.Process(ctx, req)
 }
 
 // delete runs only after Process returned, so the operation is already

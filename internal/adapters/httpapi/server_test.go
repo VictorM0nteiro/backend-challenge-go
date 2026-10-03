@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,9 +22,21 @@ const (
 	wagersURL    = "/wagering/transactions"
 )
 
-// newTestAPI starts a real Postgres, a real pool, the real routes, and an
-// authenticator bound to the Keycloak from TestMain. It returns the base URL.
+// fakeQueue stands in for SQS in the HTTP tests, which do not start LocalStack.
+type fakeQueue struct{ err error }
+
+func (f fakeQueue) Ping(context.Context) error { return f.err }
+
+// newTestAPI starts the API with a healthy queue.
 func newTestAPI(t *testing.T) string {
+	t.Helper()
+	return newTestAPIWithQueue(t, fakeQueue{})
+}
+
+// newTestAPIWithQueue starts a real Postgres, a real pool, the real routes, and
+// an authenticator bound to the Keycloak from TestMain. The queue decides how
+// readiness answers for it. It returns the base URL.
+func newTestAPIWithQueue(t *testing.T, queue QueueChecker) string {
 	t.Helper()
 	ctx := context.Background()
 
@@ -43,6 +56,7 @@ func newTestAPI(t *testing.T) string {
 		postgres.NewWagerReader(pool),
 		postgres.NewWagerProcessor(pool),
 		auth,
+		queue,
 	)
 	ts := httptest.NewServer(api.Handler())
 	t.Cleanup(ts.Close)
@@ -281,5 +295,18 @@ func TestHealth_LiveAndReadyAnswer200WhileDatabaseIsUp(t *testing.T) {
 		if status, out := call(t, http.MethodGet, base+path, nil, nil); status != http.StatusOK {
 			t.Fatalf("%s: status %d body %v", path, status, out)
 		}
+	}
+}
+
+func TestHealth_ReadyIs503WhenTheQueueIsDown(t *testing.T) {
+	base := newTestAPIWithQueue(t, fakeQueue{err: errors.New("queue unreachable")})
+
+	status, out := call(t, http.MethodGet, base+"/health/ready", nil, nil)
+	if status != http.StatusServiceUnavailable || out["status"] != "unavailable" {
+		t.Fatalf("status %d body %v, want 503 unavailable", status, out)
+	}
+	checks := out["checks"].(map[string]any)
+	if checks["queue"] != "down" || checks["database"] != "up" {
+		t.Fatalf("checks = %v, want queue down and database up", checks)
 	}
 }

@@ -25,6 +25,7 @@ type Server struct {
 	wagers    *postgres.WagerReader
 	processor *postgres.WagerProcessor
 	auth      *Authenticator
+	queue     QueueChecker
 }
 
 // NewServer wires the handlers to the adapters they need.
@@ -34,8 +35,16 @@ func NewServer(
 	wagers *postgres.WagerReader,
 	processor *postgres.WagerProcessor,
 	auth *Authenticator,
+	queue QueueChecker,
 ) *Server {
-	return &Server{pool: pool, wallets: wallets, wagers: wagers, processor: processor, auth: auth}
+	return &Server{
+		pool:      pool,
+		wallets:   wallets,
+		wagers:    wagers,
+		processor: processor,
+		auth:      auth,
+		queue:     queue,
+	}
 }
 
 // Handler returns the routes. Each business route is wrapped by the guard that
