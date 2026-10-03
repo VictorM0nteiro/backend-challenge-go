@@ -6,6 +6,7 @@ idempotência persistida e ledger append-only.
 
 - Enunciado original: [docs/README-desafio.md](docs/README-desafio.md)
 - Decisões, limitações e o que não foi feito: [ARCHITECTURE.md](ARCHITECTURE.md)
+- Feito e não feito por critério de avaliação: [ARCHITECTURE.md § 11](ARCHITECTURE.md#11-situação-por-critério-de-avaliação)
 - Decisão de escopo para o prazo de 3 dias: [docs/scope-decision.md](docs/scope-decision.md)
 
 > O escopo foi reduzido de forma consciente. O que ficou de fora está listado em
