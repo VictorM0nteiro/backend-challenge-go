@@ -5,30 +5,43 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/domain"
 )
 
-// Event types written to the outbox. The publisher, not built yet, reads these
-// rows, so the names are part of the contract with its consumers.
+// Event types written to the outbox. They are the domain's names, because they
+// are a contract with every consumer of the events.
 const (
-	eventWagerTransactionProcessed = "WagerTransactionProcessed"
-	eventWalletBalanceChanged      = "WalletBalanceChanged"
+	eventWagerTransactionProcessed = string(domain.EventWagerTransactionProcessed)
+	eventWalletBalanceChanged      = string(domain.EventWalletBalanceChanged)
 )
 
-// insertOutbox records one event inside the caller's transaction. It commits
-// together with the state it describes, so an event exists if and only if the
+// insertEvents records events inside the caller's transaction. They commit
+// together with the state they describe, so an event exists if and only if the
 // change it describes committed.
-func insertOutbox(ctx context.Context, tx pgx.Tx, aggregateID uuid.UUID, eventType string, payload any) error {
-	raw, err := json.Marshal(payload)
+func insertEvents(ctx context.Context, tx pgx.Tx, events []domain.Event) error {
+	for _, ev := range events {
+		if err := insertEvent(ctx, tx, ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// insertEvent writes one event. The outbox row takes the event's own id, so
+// every publication of this row, however many it takes, carries the same
+// eventId. The payload is the whole envelope, as a snapshot.
+func insertEvent(ctx context.Context, tx pgx.Tx, ev domain.Event) error {
+	raw, err := json.Marshal(ev)
 	if err != nil {
-		return fmt.Errorf("postgres: encode %s event %w", eventType, err)
+		return fmt.Errorf("postgres: encode %s event: %w", ev.Type, err)
 	}
 
-	query := `INSERT INTO outbox (id, aggregate_id, event_type, payload) VALUES ($1, $2, $3, $4)`
-	if _, err := tx.Exec(ctx, query, uuid.New(), aggregateID, eventType, string(raw)); err != nil {
-		return fmt.Errorf("postgres: insert outbox %s: %w", eventType, err)
+	const query = `INSERT INTO outbox (id, aggregate_id, event_type, payload, occurred_at)
+		VALUES ($1, $2, $3, $4, $5)`
+	if _, err := tx.Exec(ctx, query, ev.ID, ev.AggregateID, string(ev.Type), string(raw), ev.OccurredAt); err != nil {
+		return fmt.Errorf("postgres: insert outbox %s: %w", ev.Type, err)
 	}
-
 	return nil
 }

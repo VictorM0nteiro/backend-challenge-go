@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/domain"
-	"github.com/google/uuid"
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/logctx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -67,41 +67,13 @@ func insertWallet(ctx context.Context, tx pgx.Tx, w *domain.Wallet) error {
 	return nil
 }
 
-// transactionProcessedEvent and balanceChangedEvent are the payloads of the
-// two events a wallet opening produces (README §9).
-type transactionProcessedEvent struct {
-	TransactionID uuid.UUID        `json:"transactionId"`
-	WalletID      uuid.UUID        `json:"walletId"`
-	Kind          domain.WagerKind `json:"kind"`
-	Money         domain.Money     `json:"money"`
-	BalanceAfter  domain.Money     `json:"balanceAfter"`
-}
-
-type balanceChangedEvent struct {
-	WalletID uuid.UUID    `json:"walletId"`
-	Version  int64        `json:"version"`
-	Balance  domain.Money `json:"balance"`
-}
-
-// insertOpeningEvents records what the opening did. The aggregate of the first
-// event is the operation, and the aggregate of the second is the wallet.
+// insertOpeningEvents records what the opening did, as the same events an
+// operation produces: WagerTransactionProcessed for the OPENING and
+// WalletBalanceChanged for the wallet. The correlation id is the one of the
+// request that opened the wallet.
 func insertOpeningEvents(ctx context.Context, tx pgx.Tx, open domain.WalletOpening) error {
-	op := open.Operation
-	if err := insertOutbox(ctx, tx, op.ID(), eventWagerTransactionProcessed, transactionProcessedEvent{
-		TransactionID: op.ID(),
-		WalletID:      op.WalletID(),
-		Kind:          op.Kind(),
-		Money:         op.Amount(),
-		BalanceAfter:  *op.BalanceAfter(),
-	}); err != nil {
-		return err
-	}
-
-	return insertOutbox(ctx, tx, open.Wallet.ID(), eventWalletBalanceChanged, balanceChangedEvent{
-		WalletID: open.Wallet.ID(),
-		Version:  open.Wallet.Version(),
-		Balance:  open.Wallet.Balance(),
-	})
+	events := domain.EventsFor(open.Operation, open.Entry, open.Wallet.Version(), logctx.CorrelationID(ctx))
+	return insertEvents(ctx, tx, events)
 }
 
 // isUniqueViolation reports whether err is Postgres' unique_violation (23505).

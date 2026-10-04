@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/domain"
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/logctx"
 )
 
 const (
@@ -313,6 +314,17 @@ func (p *WagerProcessor) execute(ctx context.Context, tx pgx.Tx, req WagerReques
 		if err := p.wallets.InsertLedgerEntry(ctx, tx, entry); err != nil {
 			return Outcome{}, err
 		}
+	}
+
+	// The events commit with the operation. A replay never reaches this point, so
+	// it adds none, and any error below rolls them back with the rest.
+	//
+	// They are written before the operation row on purpose: inserting that row is
+	// where a duplicate (provider, externalTransactionId) is refused, so a refusal
+	// there has to undo events that were already written. A test relies on it.
+	events := domain.EventsFor(wt, entry, wallet.Version(), logctx.CorrelationID(ctx))
+	if err := insertEvents(ctx, tx, events); err != nil {
+		return Outcome{}, err
 	}
 
 	if err := insertWagerTransaction(ctx, tx, wt); err != nil {
