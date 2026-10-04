@@ -22,8 +22,8 @@ pendentes, reconciliação, ledger paginado e métricas. A seção 11
 do mesmo arquivo compara o que fiz com cada critério de avaliação.
 
 **Se tivesse mais um dia, o que faria primeiro?**
-Gravar os eventos de outbox das operações de provedor e escrever o publisher, porque é a
-maior lacuna em relação ao enunciado. Depois, a referência do `WIN` e o log de acesso.
+Escrever o publisher da outbox, porque é a maior lacuna em relação ao enunciado. Depois,
+as métricas e a referência do `WIN`.
 
 **Qual a parte de que você mais se orgulha? E a mais fraca?**
 Mais forte: a idempotência atômica com o movimento financeiro, testada com 50 requisições
@@ -330,8 +330,27 @@ Mudando o visibility timeout: 2, 4, 8 segundos, até 60. Sem `sleep` no processo
 
 **O que é outbox e o que você implementou?**
 Gravar o evento na mesma transação do estado, e publicar depois por um worker; evita
-publicar algo que sofreu rollback. Implementei a tabela e a gravação na abertura de
-carteira. Não implementei a gravação para as operações de provedor nem o publisher.
+publicar algo que sofreu rollback. Implementei a tabela e a gravação dos eventos
+`WagerTransactionProcessed`, `WagerTransactionRejected` e `WalletBalanceChanged`, na mesma
+transação da operação e da abertura de carteira, com o envelope completo. Não implementei o
+publisher, então os eventos são gravados e ainda não publicados.
+
+**Como os eventos saem na ordem certa?**
+Pela coluna `seq`, uma sequência da migration 000004. Eu primeiro ordenava por `occurred_at`
+e o teste me mostrou que não serve: o Postgres guarda microssegundos, e os dois eventos da
+mesma transação nascem no mesmo microssegundo, então o empate era desfeito por um UUID
+aleatório e `WalletBalanceChanged` saía antes de `WagerTransactionProcessed`. Por carteira, a
+ordem do `seq` é a do commit, porque a carteira fica travada do insert até o commit.
+
+**Por que o `eventId` é o id da linha da outbox?**
+Para uma republicação carregar o mesmo `eventId`. A publicação é "pelo menos uma vez"; o
+consumidor reconhece a duplicata por esse id.
+
+**Por que os eventos são gravados antes da linha da operação?**
+É no insert da operação que uma duplicata de `(provider, externalTransactionId)` é recusada.
+Com os eventos antes, a recusa precisa desfazê-los, e isso prova que estão na mesma
+transação. Conferi com uma mutação: gravando os eventos numa transação separada, o teste
+falha (as linhas da outbox foram de 2 para 4).
 
 **Exactly-once existe?**
 Não na entrega. O que existe é entrega at-least-once com processamento idempotente, que dá
@@ -414,15 +433,32 @@ carga, cada carteira precisa ter 1.000.000,00 menos o número de apostas que a A
 ## 12. Observabilidade
 
 **O que você entregou de observabilidade?**
-Logs em JSON (um objeto por linha, via `slog.NewJSONHandler`), `/health/live` e
-`/health/ready`. O readiness checa banco e fila e devolve 503 com o nome da dependência que
-caiu. O consumidor loga o `messageId` do envelope, o id da SQS, o status e se foi replay.
+Logs em JSON (um objeto por linha), com um `correlationId` em cada requisição e mensagem: o
+`X-Correlation-Id` do cliente, se for válido, ou um UUID, devolvido no cabeçalho da resposta;
+no consumidor, o `messageId`. Cada linha traz também `clientId`, `providerId`, `walletId`,
+`kind` e `transactionId`. Há um log de acesso por requisição (método, rota, status, duração) e
+uma linha por operação. E `/health/live` e `/health/ready`, que checa banco e fila e devolve
+503 com o nome da dependência que caiu.
+
+**Como você segue uma requisição nos logs?**
+Pelo `correlationId`: `docker compose logs app --no-log-prefix | grep <id>`. Dá a linha da
+operação e a de acesso, e o mesmo id vai para o envelope dos eventos da outbox.
+
+**O que o log não pode conter?**
+Valores monetários, corpos, cabeçalhos como `Authorization`, e o caminho cru da requisição
+(que carrega ids). O log de acesso usa o padrão da rota. Há teste para isso, e eu conferi com
+uma mutação: vazando o caminho e o cabeçalho, o teste falha.
+
+**Como funciona o contexto de log?**
+Um pacote, `logctx`, guarda uma sacola de atributos no `context`, compartilhada por ponteiro.
+Quem está fundo na pilha (o handler que descobre o `transactionId`) acrescenta à sacola, e o
+log de acesso do middleware mais externo, escrito depois, já vê o que foi acrescentado. Um
+`slog.Handler` próprio embrulha o `JSONHandler` e junta esses atributos a cada registro.
 
 **O que falta?**
 Métricas (o enunciado pede resultados por status, duplicatas, retries, DLQ, conflitos, atraso
-da outbox, latência e divergência de reconciliação), identificadores de correlação em todos os
-logs (`correlationId`, `transactionId`, `walletId`, `providerId`) e log de acesso HTTP. Hoje só
-erros 500 e o consumidor geram log.
+da outbox, latência e divergência de reconciliação) e um log próprio do processador Postgres:
+hoje o log da operação sai do handler e do consumidor.
 
 **Por que o IdP não está no readiness?**
 O enunciado pede só Postgres e SQS. Além disso, as chaves do JWKS são buscadas sob demanda,
@@ -485,7 +521,7 @@ falha, e está documentado.
 **Quais defeitos você conhece?**
 Estão no `ARCHITECTURE.md`, seção 10: a referência de um `WIN` não é validada; o ledger não
 tem chave estrangeira para a operação; a mensagem de `idempotency_key_reused` expõe o prefixo
-`postgres:`; e o outbox só grava eventos na abertura de carteira. Prefiro listar eu mesmo a
+`postgres:`; e a outbox grava os eventos mas ainda não há publisher. Prefiro listar eu mesmo a
 deixar o avaliador achar.
 
 **Achei um bug: a mesma operação com outra chave devolve 500.**

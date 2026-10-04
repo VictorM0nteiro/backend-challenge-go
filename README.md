@@ -168,6 +168,74 @@ docker compose run --rm migrate -path /migrations \
 `deploy/localstack/init/ready.d/10-queues.sh` cria, a cada subida do LocalStack,
 `wager-transactions.fifo` e `wager-transactions-dlq.fifo`, com redrive após 3 recebimentos.
 
+## Observabilidade
+
+Os logs saem em **JSON, uma linha por registro**, no `stdout`. Cada requisição HTTP e cada
+mensagem SQS tem um `correlationId`:
+
+- no HTTP, o valor do cabeçalho `X-Correlation-Id`, se for uma string curta e imprimível
+  (até 128 caracteres, sem espaço nem caractere de controle); senão, um UUID gerado. O id
+  volta no cabeçalho `X-Correlation-Id` da resposta;
+- no consumidor SQS, o `messageId` do envelope.
+
+Toda linha escrita para aquela requisição ou mensagem traz esse id, mais o que já se sabe
+naquele ponto: `clientId`, `providerId`, `walletId`, `kind`, `transactionId` e, em erro,
+`errorCode`. Exemplo real, de uma aposta:
+
+```json
+{"time":"2026-10-04T03:19:17.786108454Z","level":"INFO","msg":"wager operation","status":"PROCESSED","failureCode":"","replayed":false,"correlationId":"demo-1791083957","clientId":"provider-a","providerId":"provider-a","walletId":"181df830-893d-4572-9de8-f35de15af3f7","kind":"BET","transactionId":"79971434-ddf9-4d63-b548-a69e8a0056f7"}
+{"time":"2026-10-04T03:19:17.786135437Z","level":"INFO","msg":"http request","method":"POST","route":"POST /wagering/transactions","status":201,"durationMs":7.741,"correlationId":"demo-1791083957","clientId":"provider-a","providerId":"provider-a","walletId":"181df830-893d-4572-9de8-f35de15af3f7","kind":"BET","transactionId":"79971434-ddf9-4d63-b548-a69e8a0056f7"}
+```
+
+Para seguir uma requisição:
+
+```sh
+docker compose logs app --no-log-prefix | grep demo-1791083957
+```
+
+O que **não** vai para o log, e há teste para isso: valores monetários, corpos, cabeçalhos
+(`Authorization`) e o caminho cru da requisição. O log de acesso usa o **padrão da rota**
+(`GET /wallets/{walletId}`), porque o caminho carrega ids.
+
+Métricas **não foram implementadas**. Health checks: `/health/live` e `/health/ready`.
+
+## Eventos de integração (outbox)
+
+Toda operação decidida grava seus eventos na tabela `outbox`, na **mesma transação** da
+operação. **Hoje os eventos são gravados, mas ainda não publicados**: não há publisher.
+
+| Evento | Quando |
+|---|---|
+| `WagerTransactionProcessed` | operação `PROCESSED`, inclusive `LOSS` e a abertura de carteira |
+| `WagerTransactionRejected` | rejeição de negócio |
+| `WalletBalanceChanged` | alteração efetiva do saldo |
+
+Envelope:
+
+```json
+{
+  "eventId": "…",              "eventType": "WalletBalanceChanged",
+  "aggregateId": "<walletId>", "correlationId": "demo-1791083957",
+  "causationId": "<eventId do WagerTransactionProcessed>",
+  "occurredAt": "2026-10-04T03:04:15.690Z", "version": 1,
+  "data": {
+    "walletId": "…", "transactionId": "…", "direction": "DEBIT",
+    "money": {"amount": "25.00", "currency": "BRL"},
+    "balanceBefore": {"amount": "1000.00", "currency": "BRL"},
+    "balanceAfter": {"amount": "975.00", "currency": "BRL"},
+    "walletVersion": 2
+  }
+}
+```
+
+O envelope fica na coluna `payload` (`JSONB`), e o Postgres reordena as chaves ao armazenar: a ordem acima é lógica, não a do que `psql` mostra. `eventId` é o id da linha da outbox: uma republicação o preserva, e o consumidor deve
+deduplicar por ele. A ordem dos eventos é a coluna `seq`. Replay e operação recusada não
+gravam eventos. Para ver o que foi gravado:
+
+```sh
+docker compose exec postgres psql -U wallet -d wallet -c "SELECT seq, event_type, aggregate_id FROM outbox ORDER BY seq DESC LIMIT 10;"
+```
+
 ## Testes
 
 Os testes de integração usam containers reais (Postgres, Keycloak e LocalStack) via
@@ -188,9 +256,10 @@ O que cada pacote prova:
 
 | Pacote | Prova |
 |---|---|
-| `internal/domain` | `Money`, carteira, máquina de estados, regras dos cinco tipos, abertura |
-| `internal/adapters/postgres` | constraints e triggers, ledger imutável, disputa de saldo (100 / duas apostas de 80), idempotência com 50 requisições simultâneas, reversões, uma carteira ocupada que não bloqueia outra |
-| `internal/adapters/httpapi` | contratos HTTP com tokens reais do Keycloak, isolamento entre provedores |
+| `internal/domain` | `Money`, carteira, máquina de estados, regras dos cinco tipos, abertura, eventos e o formato do envelope |
+| `internal/adapters/postgres` | constraints e triggers, ledger imutável, disputa de saldo (100 / duas apostas de 80), idempotência com 50 requisições simultâneas, reversões, uma carteira ocupada que não bloqueia outra, eventos na outbox (mesma transação, replay, recusa) |
+| `internal/adapters/httpapi` | contratos HTTP com tokens reais do Keycloak, isolamento entre provedores, `correlationId` e log sem segredos |
+| `internal/logctx` | o contexto de log: atributos compartilhados, `correlationId`, o handler do `slog` |
 | `internal/adapters/sqs` | consumo real no LocalStack, reentrega, mesma operação por HTTP e SQS, DLQ |
 | `internal/composition` | grafo Fx válido; início, atendimento e encerramento liberando o pool |
 | `internal/e2e` | **três processos reais** do binário contra Postgres e Keycloak: 100/80 em 30 carteiras ao mesmo tempo, a mesma chave 50 vezes, e replay depois de `Kill` e novo processo |
