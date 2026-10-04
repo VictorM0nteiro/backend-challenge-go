@@ -56,6 +56,9 @@ otimização de Postgres além da configuração padrão da imagem.
 | `many`, 50 carteiras | 128 | 60 s | 137.059 | 2.282 | 49,5 ms | 91,6 ms | 126,8 ms | 213,8 ms | nenhum |
 | `many`, semente 7 | 32 | 30 s | 77.549 | 2.584 | 11,2 ms | 18,4 ms | 23,9 ms | 74,4 ms | nenhum |
 | `many`, sem replays | 32 | 30 s | 83.791 | 2.792 | 10,9 ms | 15,5 ms | 20,2 ms | 57,7 ms | nenhum |
+| `many`, instância 1 de 3 | 32 | 60 s | 99.498 | 1.658 | 19 ms | 26,4 ms | 32,2 ms | 93,4 ms | nenhum |
+| `many`, instância 2 de 3 | 32 | 60 s | 99.001 | 1.650 | 19 ms | 26,2 ms | 32,2 ms | 111 ms | nenhum |
+| `many`, instância 3 de 3 | 32 | 60 s | 99.590 | 1.659 | 19 ms | 26,2 ms | 32,1 ms | 93,5 ms | nenhum |
 
 Em todas as rodadas: status `201` em 100% das respostas, **zero erros de transporte**, e a
 verificação de saldo passou. Os relatórios completos estão em `docs/bench/`.
@@ -74,6 +77,13 @@ verificação de saldo passou. Os relatórios completos estão em `docs/bench/`.
   32: mais clientes só alongam a fila. O limite provável é o pool de 10 conexões e a CPU
   compartilhada entre gerador, app, Postgres e Keycloak. **Isso é uma hipótese; não medi
   qual dos dois limita.**
+- **Três instâncias dobraram a vazão agregada.** As três cargas rodaram ao mesmo tempo,
+  cada uma contra uma instância, e somaram cerca de 4.970 RPS contra 2.523 de uma instância
+  só, com todos os saldos conferidos. Isso indica que o limite da rodada com 128 clientes
+  estava **em cada instância** (CPU do app ou o pool de 10 conexões, que são 30 no total com
+  três instâncias) e não no Postgres. **Não separa pool de CPU**, e as três cargas e os
+  cinco containers dividiram a mesma máquina, então o ganho é uma indicação, não uma medida
+  de escalabilidade.
 - **Replays custam quase o mesmo que operações novas.** Sem replays, 2.792 RPS contra 2.584
   RPS com 10% de replays (rodadas curtas, sem repetição estatística): a diferença é pequena e
   não distingo ruído de efeito. Um replay ainda abre transação, reivindica a chave e lê a
@@ -89,7 +99,10 @@ verificação de saldo passou. Os relatórios completos estão em `docs/bench/`.
 - **Variação entre rodadas:** cada configuração foi executada uma vez, exceto o `many` com
   32 clientes (três execuções, 2.523 a 2.792 RPS, com replays diferentes). Não há intervalo
   de confiança.
-- **Múltiplas instâncias do app**, falhas durante a carga, e SQS sob carga.
+- **SQS sob carga.** (Várias instâncias e a morte do processo durante a carga estão no
+  README, na seção "Múltiplas instâncias e simulação de falhas"; lá o RPS da rodada com falha
+  não deve ser lido como vazão, porque este programa conta as tentativas que falharam em
+  `requests` e nos percentis.)
 - **Gerador e sistema na mesma máquina:** o gerador consome CPU que o sistema não tem. Os
   números absolutos são, portanto, pessimistas em relação a uma execução em máquinas
   separadas, e não comparáveis com outro ambiente.
