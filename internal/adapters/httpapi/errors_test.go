@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/adapters/postgres"
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/domain"
 )
@@ -30,6 +32,9 @@ func TestStatusFor(t *testing.T) {
 		{"carteira ja existe", postgres.ErrWalletAlreadyExists, 409, "conflict"},
 		{"versao concorrente", postgres.ErrWalletVersionConflict, 409, "concurrent_update"},
 		{"prazo do banco esgotado", fmt.Errorf("acquire: %w", context.DeadlineExceeded), 503, "temporarily_unavailable"},
+		{"banco inacessivel (falha de conexao)", fmt.Errorf("begin tx: %w", &pgconn.ConnectError{}), 503, "temporarily_unavailable"},
+		{"banco desligando (57P01)", fmt.Errorf("query: %w", &pgconn.PgError{Code: "57P01"}), 503, "temporarily_unavailable"},
+		{"erro do banco que nao e indisponibilidade (23514)", fmt.Errorf("insert: %w", &pgconn.PgError{Code: "23514"}), 500, "internal"},
 		{"erro desconhecido", errors.New("boom"), 500, "internal"},
 	}
 

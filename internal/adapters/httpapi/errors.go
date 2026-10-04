@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -66,7 +65,9 @@ func statusFor(err error) (int, string) {
 	case errors.Is(err, postgres.ErrWalletVersionConflict):
 		return http.StatusConflict, "concurrent_update"
 
-	case errors.Is(err, context.DeadlineExceeded):
+	case postgres.IsUnavailable(err):
+		// The database could not be reached or timed out. Nothing was applied,
+		// so the client may retry the same request with the same key.
 		return http.StatusServiceUnavailable, "temporarily_unavailable"
 
 	case errors.Is(err, errForbidden):
@@ -77,14 +78,18 @@ func statusFor(err error) (int, string) {
 	}
 }
 
-// writeError answers err. A 500 is logged with its cause and answered with a
-// generic message, so database details never reach the client.
+// writeError answers err. A 500 or a 503 is logged with its cause and answered
+// with a fixed message, so database details never reach the client.
 func writeError(w http.ResponseWriter, err error) {
 	status, code := statusFor(err)
 	message := err.Error()
-	if status == http.StatusInternalServerError {
+	switch status {
+	case http.StatusInternalServerError:
 		slog.Error("request failed", "error", err)
 		message = "internal error"
+	case http.StatusServiceUnavailable:
+		slog.Warn("dependency unavailable", "error", err)
+		message = "service temporarily unavailable, retry with the same Idempotency-Key"
 	}
 	writeJSON(w, status, errorBody{Error: errorDetail{Code: code, Message: message}})
 }
