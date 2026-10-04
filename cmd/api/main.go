@@ -8,12 +8,15 @@ import (
 	"os"
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/composition"
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/logctx"
 	"github.com/joho/godotenv"
 	"go.uber.org/fx"
 )
 
+// JSON lines, with the correlation id and the identifiers attached to the
+// context added to every record logged through a *Context call.
 func main() {
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+	slog.SetDefault(slog.New(logctx.NewHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		log.Fatalf("load .env: %v", err)

@@ -3,11 +3,13 @@ package httpapi
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/adapters/postgres"
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/app"
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/domain"
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/logctx"
 )
 
 // wagerEndpoint is part of the idempotency key. A key is unique per
@@ -38,6 +40,8 @@ func (s *Server) submitWager(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+
+	logctx.Add(r.Context(), slog.String("walletId", req.WalletID.String()), slog.String("kind", string(req.Kind)))
 
 	hash, err := app.Fingerprint(app.WagerBody{
 		ProviderID:                     req.ProviderID,
@@ -75,19 +79,30 @@ func (s *Server) submitWager(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	return writeWagerOutcome(w, out)
+	logctx.Add(r.Context(), slog.String("transactionId", out.TransactionID.String()))
+
+	view, err := writeWagerOutcome(w, out)
+	if err != nil {
+		return err
+	}
+	slog.InfoContext(r.Context(), "wager operation",
+		slog.String("status", string(view.Status)),
+		slog.String("failureCode", string(view.FailureCode)),
+		slog.Bool("replayed", out.Replayed),
+	)
+	return nil
 }
 
 // writeWagerOutcome answers with the outcome the processor stored. The body
 // was fixed when the operation ran; this adds only the flag that tells a
 // replay apart from the first answer.
-func writeWagerOutcome(w http.ResponseWriter, out postgres.Outcome) error {
+func writeWagerOutcome(w http.ResponseWriter, out postgres.Outcome) (wagerView, error) {
 	var stored wagerView
 	if err := json.Unmarshal(out.Body, &stored); err != nil {
-		return fmt.Errorf("httpapi: decode stored outcome: %w", err)
+		return wagerView{}, fmt.Errorf("httpapi: decode stored outcome: %w", err)
 	}
 	writeJSON(w, out.StatusCode, wagerResponse{wagerView: stored, IdempotentReplay: out.Replayed})
-	return nil
+	return stored, nil
 }
 
 func (s *Server) getWager(w http.ResponseWriter, r *http.Request) error {

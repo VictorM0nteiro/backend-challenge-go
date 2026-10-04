@@ -57,7 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /wagering/transactions/{transactionId}", s.auth.Provider(handle(s.getWager)))
 	mux.HandleFunc("GET /health/live", handle(s.live))
 	mux.HandleFunc("GET /health/ready", handle(s.ready))
-	return mux
+	return correlation(accessLog(mux))
 }
 
 // handler returns an error instead of writing it, so the mapping from errors
@@ -67,7 +67,7 @@ type handler func(w http.ResponseWriter, r *http.Request) error
 func handle(h handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := h(w, r); err != nil {
-			writeError(w, err)
+			writeError(w, r, err)
 		}
 	}
 }

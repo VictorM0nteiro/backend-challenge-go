@@ -8,6 +8,7 @@ import (
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/adapters/postgres"
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/domain"
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/logctx"
 )
 
 // Sentinels for failures the HTTP layer detects itself. Adapter and domain
@@ -79,16 +80,20 @@ func statusFor(err error) (int, string) {
 }
 
 // writeError answers err. A 500 or a 503 is logged with its cause and answered
-// with a fixed message, so database details never reach the client.
-func writeError(w http.ResponseWriter, err error) {
+// with a fixed message, so database details never reach the client. The error
+// code is added to the request's log context, so the access log line carries it.
+func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code := statusFor(err)
+	ctx := r.Context()
+	logctx.Add(ctx, slog.String("errorCode", code))
+
 	message := err.Error()
 	switch status {
 	case http.StatusInternalServerError:
-		slog.Error("request failed", "error", err)
+		slog.ErrorContext(ctx, "request failed", "error", err)
 		message = "internal error"
 	case http.StatusServiceUnavailable:
-		slog.Warn("dependency unavailable", "error", err)
+		slog.WarnContext(ctx, "dependency unavailable", "error", err)
 		message = "service temporarily unavailable, retry with the same Idempotency-Key"
 	}
 	writeJSON(w, status, errorBody{Error: errorDetail{Code: code, Message: message}})

@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/adapters/postgres"
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/logctx"
 )
 
 const (
@@ -77,31 +78,53 @@ func (c *Consumer) Run(ctx context.Context) {
 
 // handle applies one message and then settles it: delete it on success, leave
 // it for the redrive policy on a permanent failure, and postpone it with
-// backoff on a transient one. The logs carry the envelope's messageId, which is
-// the identity the inbox uses, and the SQS id, which correlates with AWS.
+// backoff on a transient one.
+//
+// The envelope's messageId is the correlation id: it is the identity the inbox
+// uses, and it is what ties every log line, and later every event, to this
+// message. The SQS id is logged too, to correlate with AWS.
 func (c *Consumer) handle(ctx context.Context, msg types.Message) {
+	ctx = logctx.NewContext(ctx)
 	env, err := parse(aws.ToString(msg.Body))
-	log := slog.With("sqsMessageId", aws.ToString(msg.MessageId), "messageId", env.MessageID)
+
+	sqsID := aws.ToString(msg.MessageId)
+	correlationID := env.MessageID
+	if correlationID == "" {
+		correlationID = sqsID
+	}
+	logctx.SetCorrelationID(ctx, correlationID)
+	logctx.Add(ctx, slog.String("sqsMessageId", sqsID))
+	if err == nil {
+		logctx.Add(ctx,
+			slog.String("messageId", env.MessageID),
+			slog.String("providerId", env.Data.ProviderID),
+			slog.String("walletId", env.Data.WalletID.String()),
+			slog.String("kind", string(env.Data.Kind)),
+		)
+	}
 
 	var out postgres.Outcome
 	if err == nil {
 		out, err = c.apply(ctx, env)
 	}
+	if err == nil {
+		logctx.Add(ctx, slog.String("transactionId", out.TransactionID.String()))
+	}
 
 	switch {
 	case err == nil:
 		// Done or rejected by the business rules. Both are terminal outcomes.
-		log.Info("message settled", "status", out.StatusCode, "replayed", out.Replayed)
+		slog.InfoContext(ctx, "message settled", "status", out.StatusCode, "replayed", out.Replayed)
 		c.delete(ctx, msg)
 	case ctx.Err() != nil:
 		// Shutdown interrupted the work. Make the message visible now so another
 		// instance can take it, instead of waiting for the timeout to run out.
-		log.Info("shutdown during message, releasing it")
+		slog.InfoContext(ctx, "shutdown during message, releasing it")
 		c.setVisibility(ctx, msg, 0)
 	case isPermanent(err):
-		log.Error("permanent failure, message left for the DLQ", "error", err)
+		slog.ErrorContext(ctx, "permanent failure, message left for the DLQ", "error", err)
 	default:
-		log.Warn("transient failure, retrying with backoff", "error", err, "receiveCount", receiveCount(msg))
+		slog.WarnContext(ctx, "transient failure, retrying with backoff", "error", err, "receiveCount", receiveCount(msg))
 		c.setVisibility(ctx, msg, retryDelay(receiveCount(msg)))
 	}
 }
@@ -129,7 +152,7 @@ func (c *Consumer) delete(ctx context.Context, msg types.Message) {
 		ReceiptHandle: msg.ReceiptHandle,
 	})
 	if err != nil {
-		slog.Error("delete message", "messageId", aws.ToString(msg.MessageId), "error", err)
+		slog.ErrorContext(ctx, "delete message", "error", err)
 	}
 }
 
@@ -145,7 +168,7 @@ func (c *Consumer) setVisibility(ctx context.Context, msg types.Message, seconds
 		VisibilityTimeout: seconds,
 	})
 	if err != nil {
-		slog.Error("change message visibility", "messageId", aws.ToString(msg.MessageId), "error", err)
+		slog.ErrorContext(ctx, "change message visibility", "error", err)
 	}
 }
 

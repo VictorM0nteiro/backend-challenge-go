@@ -3,9 +3,11 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
+	"github.com/VictorM0nteiro/backend-challenge-go/internal/logctx"
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
@@ -121,11 +123,18 @@ func (a *Authenticator) guard(check func(principal) error, next http.Handler) ht
 		p, err := a.authenticate(r)
 		if err != nil {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="wallet"`)
-			writeError(w, err)
+			writeError(w, r, err)
 			return
 		}
+		// From here on every log line for this request says who is calling.
+		who := []slog.Attr{slog.String("clientId", p.ClientID)}
+		if !p.isInternal() {
+			who = append(who, slog.String("providerId", p.ClientID))
+		}
+		logctx.Add(r.Context(), who...)
+
 		if err := check(p); err != nil {
-			writeError(w, err)
+			writeError(w, r, err)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(withPrincipal(r.Context(), p)))
