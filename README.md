@@ -117,6 +117,7 @@ Respostas e como distingui-las:
 | Rejeição de negócio (ex.: saldo insuficiente) | 422 | `status: REJECTED`, `failureCode`, **sem** envelope `error` |
 | Mesma chave, corpo diferente | 422 | `error.code: idempotency_key_reused` |
 | Chave ainda em processamento | 409 | `error.code: request_in_flight` |
+| Mesma operação (provedor + `externalTransactionId`) com outra chave | 409 | `error.code: duplicate_operation` |
 | Carteira já existe para jogador e moeda | 409 | `error.code: conflict` |
 | Entrada inválida | 400 | `error.code: invalid_request` |
 | Token ausente, inválido ou expirado | 401 | `error.code: unauthenticated` |

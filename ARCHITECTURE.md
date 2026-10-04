@@ -89,6 +89,11 @@ Qualquer erro desfaz tudo, inclusive as reivindicações dos passos 1 e 2.
 - A reivindicação acontece **dentro** da transação. Uma segunda requisição com a mesma
   chave bloqueia no índice até a primeira terminar e então cai no replay. Por isso
   `in_flight` quase nunca é visível; o ramo existe e é testado com uma linha semeada.
+- **Mesma operação, outra chave.** `(providerId, externalTransactionId)` tem `UNIQUE` no
+  banco, então uma operação não é reaplicada trocando a chave. A violação dessa constraint
+  (identificada pelo nome, para não confundir com o índice de reversão) vira
+  `ErrDuplicateExternalTransaction`: HTTP 409 `duplicate_operation`, e erro permanente no
+  SQS. A transação inteira é desfeita, então o saldo não muda e a chave usada fica livre.
 - A resposta é gravada como `TEXT`, não `JSONB`: o `JSONB` reordena chaves, e o replay deve
   devolver o conteúdo original.
 - O replay devolve o saldo observado no processamento original.
@@ -222,11 +227,6 @@ Outras exigências do enunciado não atendidas:
 
 Defeitos conhecidos:
 
-- **Mesma operação com outra chave.** Reenviar o mesmo `(providerId,
-  externalTransactionId)` com uma chave de idempotência diferente não reaplica o efeito (a
-  constraint `UNIQUE` barra e a transação é desfeita), mas a resposta é um 500 genérico em
-  vez de um conflito. Por SQS, o mesmo caso é tratado como transitório e só chega à DLQ
-  após as tentativas.
 - **`WIN` com referência** não é validado contra a aposta de origem.
 - O ledger não tem chave estrangeira para `wager_transactions`.
 - A mensagem de `idempotency_key_reused` expõe o prefixo interno `postgres:`.
@@ -234,19 +234,36 @@ Defeitos conhecidos:
 
 ## 11. Situação por critério de avaliação
 
-Autoavaliação contra a tabela do enunciado (§14). Sem estimativa de pontos: o objetivo é
-apontar onde está a evidência e onde ela falta.
+Autoavaliação contra a tabela do enunciado (§14). **Os percentuais e os pontos são uma
+estimativa minha**, atribuída a partir do que tem evidência no repositório; o avaliador pode
+pontuar diferente.
 
-| Critério (pontos) | Feito | Não feito |
-|---|---|---|
-| **Integridade financeira (20)** | `Money` em `int64`, sem float, com overflow tratado; saldo não negativo por `CHECK`; ledger imutável por trigger; lançamento validado (`balanceAfter = balanceBefore ± valor`); reversões com valor igual, mesma rodada e no máximo uma bem-sucedida; jogador conferido contra o dono da carteira; saldo conferido contra o ledger nos testes de integração; códigos distintos para falta de saldo em aposta e em reversão | reconciliação (o endpoint); validação da referência de `WIN` |
-| **Concorrência (20)** | `SELECT ... FOR UPDATE` por carteira, sem lock global; versão como segunda barreira; teste obrigatório 100 / 80 / 80 repetido 100 vezes com `-race`; estado todo no banco, nada em memória do processo | prova com três processos independentes |
-| **Idempotência (15)** | chave persistida na mesma transação do efeito; conflito por hash (422); replay com o saldo original; hash canônico igual entre HTTP e SQS; rejeição de negócio também reproduzida; teste com 50 requisições simultâneas e teste cruzando HTTP e SQS | resposta de conflito para a mesma operação com outra chave (hoje 500); teste de reinício |
-| **Mensageria e recuperação (15)** | inbox na mesma transação, com hash; remoção só após o commit; backoff por visibility timeout; DLQ com redrive, testada; liberação da mensagem no `SIGTERM` | publisher da outbox; eventos das operações de provedor; envelope de evento; worker de `PENDING_REFERENCE`; testes de interrupção |
-| **Modelagem e arquitetura (10)** | entidades com estado privado, construtores com validação, criação separada de reidratação, erros com `errors.Is`; domínio sem dependência de infraestrutura; Fx com módulos, `Provide`, `Invoke` e `Lifecycle`; provedor definido pelo token, rotas internas por role | caso de uso dentro do adapter Postgres, sem porta; controle de acesso à fila |
-| **Testes (10)** | Postgres, Keycloak e LocalStack reais; isolamento entre provedores em envio e consulta; carteiras distintas em paralelo e uma carteira ocupada que não bloqueia outra; token ausente, inválido, de outro emissor e com algoritmo errado; composição e ciclo de vida do Fx | interrupção e reinício; três instâncias; publishers concorrentes; reversão antes da referência com resolução posterior |
-| **Observabilidade (5)** | `/health/live`; `/health/ready` com banco e fila; logs em JSON; logs do consumidor com `messageId` | identificadores de correlação nos logs; métricas; log de acesso HTTP |
-| **Documentação (5)** | `docker compose up --build` a partir de checkout limpo; IdP, filas e migrations provisionados; `.env.example`; decisões e lacunas neste arquivo | instruções de múltiplas instâncias e simulação de falhas |
+### 11.1. Pontuação estimada
+
+| Critério | Peso | Atendido | Pontos | Por quê |
+|---|---:|---:|---:|---|
+| Integridade financeira | 20 | ~75% | 15 | Falta o endpoint de reconciliação, que o critério cita explicitamente, e a validação da referência de `WIN` |
+| Concorrência | 20 | ~65% | 13 | Lock, teste 100/80/80 e carteiras em paralelo estão provados. Falta a demonstração com três processos, que o enunciado exige |
+| Idempotência | 15 | ~90% | 13,5 | Falta o teste de reinício |
+| Mensageria e recuperação | 15 | ~45% | 7 | Inbox, retry, DLQ e shutdown prontos. Faltam publisher da outbox, eventos das operações e `PENDING_REFERENCE` |
+| Modelagem e arquitetura | 10 | ~80% | 8 | O caso de uso está no adapter, e não há controle de acesso à fila |
+| Testes | 10 | ~65% | 6,5 | Infra real e isolamento entre provedores. Faltam interrupção, reinício, três instâncias e publishers concorrentes |
+| Observabilidade | 5 | ~35% | 1,75 | Health checks e logs em JSON, sem métricas e com correlação parcial |
+| Documentação | 5 | ~85% | 4,25 | Falta a instrução de múltiplas instâncias e simulação de falhas |
+| **Total** | **100** | | **~69** | faixa plausível: 60 a 75 |
+
+### 11.2. O que foi pedido, o que foi feito e o que falta
+
+| Critério | O que foi pedido | O que foi feito | O que falta |
+|---|---|---|---|
+| **Integridade financeira (20)** | Dinheiro sem `float`, em todas as etapas<br>Invariantes impostas pelo banco<br>Ledger append-only, com lançamento validado<br>Reversões íntegras: valor igual, uma só por operação, código próprio para falta de saldo<br>Reconciliação confiável | `Money` em `int64` com moeda e overflow tratado<br>`CHECK` de saldo ≥ 0, `UNIQUE` no ledger e trigger contra `UPDATE`/`DELETE`/`TRUNCATE`<br>Lançamento confere `balanceAfter = balanceBefore ± valor`<br>Reversões com mesma rodada, mesma moeda e valor igual, uma só bem-sucedida, `reversal_insufficient_funds` distinto<br>Jogador conferido contra o dono da carteira; moeda conferida em `LOSS`<br>Saldo conferido contra o ledger nos testes | Endpoint `POST /wallets/:id/reconciliation`<br>Validação da referência de `WIN`<br>`OPENING` sem os metadados externos (usa provedor `internal`)<br>Estado `FAILED` nunca é gravado<br>Moeda validada só pelo formato, não pela lista ISO 4217 |
+| **Concorrência (20)** | Coordenação por carteira, sem lock global<br>Sem atualização perdida<br>Teste obrigatório: saldo 100, duas apostas de 80<br>Carteiras diferentes em paralelo<br>Três processos independentes<br>A mesma aposta 50 vezes em paralelo | `SELECT ... FOR UPDATE` por carteira, mais a versão como segunda barreira<br>Teste 100/80/80 repetido 100 vezes com `-race`<br>Teste em que uma carteira ocupada não bloqueia outra<br>20 carteiras processadas ao mesmo tempo<br>50 envios simultâneos da mesma chave, com um único débito<br>Estado só no banco, nada em memória do processo | Demonstração com três processos<br>Cenários de concorrência repetidos com várias instâncias |
+| **Idempotência (15)** | Persistente, sobrevive ao reinício<br>Hash canônico igual entre HTTP e SQS<br>Mesma chave com corpo diferente: conflito<br>Replay devolve o resultado e o saldo originais<br>A mesma operação não é reaplicada com outra chave | Chave persistida na mesma transação do efeito<br>Hash determinístico de `app.Fingerprint`, com teste de equivalência HTTP × SQS<br>422 para corpo diferente, 409 para chave em processamento<br>Replay com o saldo do processamento original, inclusive de rejeições<br>Outra chave para a mesma operação: 409 `duplicate_operation` | Teste de reinício da aplicação<br>Política de retenção das chaves<br>Replay da abertura de carteira (hoje devolve 409) |
+| **Mensageria e recuperação (15)** | Inbox atômica com a operação<br>Mensagem removida só após o commit<br>Retry com backoff e DLQ<br>Encerramento seguro<br>Outbox com publishers concorrentes e recuperação<br>`PENDING_REFERENCE` com worker | Inbox com hash na mesma transação<br>Remoção após o commit<br>Backoff de 2 s a 60 s pelo visibility timeout, redrive para a DLQ, ambos testados<br>`SIGTERM` libera a mensagem em andamento<br>Tabela de outbox e os dois eventos da abertura de carteira, no mesmo commit | Publisher da outbox, com disputa e recuperação<br>Eventos das operações de provedor e o envelope completo<br>Destino dos eventos provisionado<br>Worker de `PENDING_REFERENCE`<br>Testes de interrupção entre commit e remoção |
+| **Modelagem e arquitetura (10)** | Entidades encapsuladas, construtores, criação separada de reidratação<br>Erros classificáveis<br>Fx com módulos e ciclo de vida<br>Domínio independente de infraestrutura<br>Identidade que define o provedor, rotas de carteira só internas | Estado privado, construtores validando, `Rehydrate` separado<br>Erros com `errors.Is`<br>Fx com `Module`, `Provide`, `Invoke` e `Lifecycle`, e encerramento na ordem inversa<br>Domínio sem importar Fx, HTTP, SQS nem pgx<br>OIDC com Keycloak: `azp` é o provedor, rotas internas por role | Caso de uso dentro do adapter Postgres, sem porta<br>Controle de acesso à fila por credenciais e políticas |
+| **Testes (10)** | Integração com Postgres, IdP e LocalStack reais<br>Isolamento entre provedores<br>Paralelismo e interrupção<br>Os oito cenários de concorrência e recuperação<br>`go test -race` | Containers reais dos três<br>Isolamento no envio e na consulta<br>Cenários 1, 2 e 3 (50 envios, 100/80/80, carteiras distintas), mais HTTP × SQS e a composição do Fx<br>Token ausente, inválido, de outro emissor e com algoritmo errado | Cenário 4 (três instâncias)<br>Cenário 5 (interrupção do consumidor)<br>Cenário 6 (dois publishers)<br>Cenário 7 (reversão antes da referência)<br>Cenário 8 (reinício)<br>Token expirado contra o IdP real |
+| **Observabilidade (5)** | Logs JSON com identificadores de correlação<br>Métricas<br>Health checks | Logs em JSON<br>`/health/live` e `/health/ready` com banco e fila<br>`messageId` nos logs do consumidor | Métricas<br>`correlationId`, `transactionId`, `walletId` e `providerId` nos logs<br>Log de acesso HTTP |
+| **Documentação (5)** | Execução reproduzível a partir de um checkout limpo<br>IdP provisionado<br>`.env.example`<br>Decisões e limitações<br>Como rodar múltiplas instâncias e falhas | `docker compose up --build` com migrations, realm e filas provisionados<br>`README.md` com exemplos autenticados<br>`.env.example`<br>Este arquivo<br>Teste de carga documentado em `docs/loadtest.md` | Instruções de múltiplas instâncias e de simulação de falhas, que dependem de cenários não executados |
 
 Condições eliminatórias (§14):
 

@@ -105,6 +105,7 @@ func TestIsPermanent_SeparatesBadInputFromTransientFailures(t *testing.T) {
 		{"mensagem_reutilizada_com_corpo_diferente", postgres.ErrMessageReused, true},
 		{"carteira_inexistente", postgres.ErrWalletNotFound, true},
 		{"jogador_nao_e_dono_da_carteira", postgres.ErrWalletOwnerMismatch, true},
+		{"mesma_operacao_com_outra_chave", postgres.ErrDuplicateExternalTransaction, true},
 		{"chave_em_processamento", postgres.ErrRequestInFlight, false},
 		{"conflito_de_versao", postgres.ErrWalletVersionConflict, false},
 		{"banco_fora_do_ar", errors.New("connection refused"), false},

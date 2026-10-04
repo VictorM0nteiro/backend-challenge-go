@@ -18,16 +18,16 @@ ledger que não pode ser alterado.
 O enunciado é de nível pleno/sênior e o prazo era de três dias. Preferi entregar o núcleo
 financeiro bem testado e documentar o resto do que entregar tudo pela metade. O que ficou de
 fora está na seção 10 do `ARCHITECTURE.md`: publisher da outbox, worker de referências
-pendentes, reconciliação, ledger paginado e a prova com três instâncias.
+pendentes, reconciliação, ledger paginado, métricas e a prova com três instâncias. A seção 11
+do mesmo arquivo compara o que fiz com cada critério de avaliação.
 
 **Se tivesse mais um dia, o que faria primeiro?**
 Gravar os eventos de outbox das operações de provedor e escrever o publisher, porque é a
-maior lacuna em relação ao enunciado. Depois, corrigir o caso da mesma operação com outra
-chave, que hoje responde 500.
+maior lacuna em relação ao enunciado. Depois, a referência do `WIN` e o log de acesso.
 
 **Qual a parte de que você mais se orgulha? E a mais fraca?**
-Mais forte: a idempotência atômica com o movimento financeiro, testada com 10 requisições
-simultâneas e cruzando HTTP com SQS. Mais fraca: o caso de uso mora no adapter Postgres, em
+Mais forte: a idempotência atômica com o movimento financeiro, testada com 50 requisições
+simultâneas e cruzando HTTP com SQS, e com o saldo conferido contra o ledger ao final. Mais fraca: o caso de uso mora no adapter Postgres, em
 vez de uma camada de aplicação com portas.
 
 ---
@@ -82,6 +82,13 @@ falhar. Se falhar, alguém leu a carteira fora de um lock — um bug que eu quer
 Não entre operações: cada operação trava uma única carteira. Deadlock exige dois recursos
 travados em ordens diferentes.
 
+**Como você prova que não há lock global?**
+Um teste abre uma transação que segura o lock da carteira A e, enquanto ela está aberta,
+processa uma operação na carteira B, que precisa terminar em até 3 segundos
+(`TestProcess_ABusyWalletDoesNotBlockAnotherOne`). Outro teste processa 20 carteiras ao
+mesmo tempo. E o teste de carga mostra a diferença: 2.523 RPS com 50 carteiras contra 462
+com uma só.
+
 **Isso funciona com três instâncias da aplicação?**
 O desenho sim, porque o lock é do banco e não um mutex em memória. Mas eu não demonstrei
 isso com três processos; está listado como não feito.
@@ -95,7 +102,8 @@ A conexão cai, o Postgres aborta a transação e solta o lock. Nada foi gravado
 
 **Qual o gargalo desse desenho?**
 Uma carteira muito disputada serializa tudo, e cada espera ocupa uma conexão do pool. Com o
-pool esgotado, `DB_ACQUIRE_TIMEOUT` devolve erro em vez de pendurar.
+pool esgotado, `DB_ACQUIRE_TIMEOUT` devolve erro em vez de pendurar. No teste de carga, uma
+carteira só entregou 462 RPS, cerca de 2,2 ms por operação serializada.
 
 ---
 
@@ -139,10 +147,22 @@ falhando.
 Gravo. É uma decisão de negócio: vira uma operação `REJECTED` com código, e o replay devolve
 a mesma rejeição. Já entrada inválida faz rollback e não consome a chave.
 
+**O jogador informado precisa ser o dono da carteira?**
+Sim. Depois do lock, o processador compara o dono da carteira com o `playerId` da operação.
+Se forem diferentes, devolve `ErrWalletOwnerMismatch`: nada se move, a chave não é
+consumida, e o HTTP responde 404, igual a carteira inexistente, para não revelar que ela
+existe. Por SQS é erro permanente e a mensagem vai para a DLQ. Antes disso, um provedor
+autenticado podia movimentar qualquer carteira informando outro jogador; descobri relendo o
+enunciado contra o código.
+
 **Mesma operação, chave diferente. O que acontece?**
-A constraint `UNIQUE (provider_id, external_transaction_id)` impede o segundo efeito. Mas a
-resposta hoje é um 500, quando deveria ser um conflito. É um defeito conhecido; a correção é
-tratar o erro `23505` desse índice e devolver a operação original.
+A constraint `UNIQUE (provider_id, external_transaction_id)` impede o segundo efeito. A
+violação vira `ErrDuplicateExternalTransaction`, que responde 409 `duplicate_operation`. A
+transação inteira é desfeita, então o saldo não muda e a chave nova fica livre. Reconheço a
+constraint pelo **nome**, e não só pelo código `23505`, porque a tabela tem outro índice único
+(o de uma reversão por operação) que não pode ser confundido com esse. Teste:
+`TestProcess_SameExternalIDUnderAnotherKeyIsAConflictAndMovesNothing`. Antes da correção
+saía um 500 genérico.
 
 **As chaves expiram?**
 Não. A tabela cresce sem limite. Em produção haveria uma política de retenção.
@@ -169,7 +189,8 @@ terminais e imutáveis.
 
 **O que `LOSS` faz?**
 Nada no saldo. Valor zero, sem lançamento, sem mudar a versão. Só registra que a rodada foi
-perdida.
+perdida. Como não há movimento, `Debit` e `Credit` não conferem a moeda; por isso o
+processador confere a moeda da carteira antes de registrar o `LOSS`.
 
 **Diferença entre `REFUND` e `ROLLBACK`?**
 `REFUND` só devolve uma aposta. `ROLLBACK` desfaz aposta, ganho ou reembolso; desfazer um
@@ -209,7 +230,9 @@ intencionado. Para isso seriam necessários permissões separadas e auditoria.
 
 **Por que guardar o saldo se dá para somar o ledger?**
 Leitura e checagem de saldo em tempo constante. O ledger serve para auditoria e para a
-reconciliação — que não foi implementada.
+reconciliação. O endpoint de reconciliação não foi implementado, mas os testes de integração
+conferem o saldo guardado contra o ledger (`assertLedgerMatchesBalance`) e o teste de carga
+confere cada carteira contra as operações confirmadas.
 
 **Por que pgx e não GORM?**
 O enunciado pede transações, locks e constraints explícitos. Com SQL à vista, dá para
@@ -349,27 +372,107 @@ constraint.
 
 **Como testar concorrência sem teste instável?**
 Não dependo de tempo. Disparo goroutines, espero todas e verifico o estado final: um
-sucesso, uma rejeição, saldo 20. Rodei 100 vezes com `-race`.
+sucesso, uma rejeição, saldo 20. Rodei 100 vezes com `-race`. A exceção é o teste da carteira
+ocupada, que tem um limite de 3 segundos; uma falha repetida dele significaria lock global.
 
 **O que o `-race` detecta?**
 Acesso concorrente à memória sem sincronização, dentro do processo. Não detecta condição de
 corrida no banco — para isso servem os testes de integração.
 
 **O que não está testado?**
-Queda de processo no meio, três instâncias, indisponibilidade do banco, e expiração real de
-token no Keycloak (só com token assinado no teste).
+Queda de processo no meio, reinício da aplicação, três instâncias, indisponibilidade do
+banco, publishers concorrentes, e expiração real de token no Keycloak (só com token
+assinado no teste).
+
+**Como você conferiu que o saldo bate?**
+Dois níveis. Nos testes de integração, `assertLedgerMatchesBalance` verifica que o saldo
+guardado é o saldo antes do primeiro lançamento mais créditos menos débitos. No teste de
+carga, cada carteira precisa ter 1.000.000,00 menos o número de apostas que a API respondeu
+`201`; em todas as rodadas bateu.
 
 ---
 
-## 12. Perguntas difíceis
+## 12. Observabilidade
+
+**O que você entregou de observabilidade?**
+Logs em JSON (um objeto por linha, via `slog.NewJSONHandler`), `/health/live` e
+`/health/ready`. O readiness checa banco e fila e devolve 503 com o nome da dependência que
+caiu. O consumidor loga o `messageId` do envelope, o id da SQS, o status e se foi replay.
+
+**O que falta?**
+Métricas (o enunciado pede resultados por status, duplicatas, retries, DLQ, conflitos, atraso
+da outbox, latência e divergência de reconciliação), identificadores de correlação em todos os
+logs (`correlationId`, `transactionId`, `walletId`, `providerId`) e log de acesso HTTP. Hoje só
+erros 500 e o consumidor geram log.
+
+**Por que o IdP não está no readiness?**
+O enunciado pede só Postgres e SQS. Além disso, as chaves do JWKS são buscadas sob demanda,
+então o app sobe e atende mesmo com o Keycloak fora; só os tokens novos falham.
+
+---
+
+## 13. Teste de carga
+
+**O que você mediu e como?**
+Um programa, `cmd/loadtest`, abre carteiras e dispara `BET` de 1,00 com token real do
+Keycloak e chave única, por um tempo fixo, em dois cenários: 50 carteiras e uma carteira só.
+Ele reporta RPS, p50, p95, p99, status e erros, e confere o saldo de cada carteira. Método e
+números em `docs/loadtest.md`.
+
+**Quais foram os resultados?**
+Com 32 clientes por 60 segundos: 50 carteiras deram 2.523 RPS, p50 de 12 ms e p99 de 23 ms;
+uma carteira deu 462 RPS, p50 de 62 ms e p99 de 146 ms. Zero erros de transporte e saldos
+batendo.
+
+**Por que a carteira única é 5,5 vezes mais lenta?**
+O `FOR UPDATE` serializa: cada transação segura o lock até o commit, então as operações
+formam fila. 462 RPS equivale a cerca de 2,2 ms por operação. Não é defeito; é o preço da
+garantia de não haver saldo negativo.
+
+**Como você explica a latência?**
+Pela lei de Little: com 32 clientes sempre pendentes, a latência média é 32 dividido pelo RPS.
+Dá 12,7 ms no cenário de várias carteiras e 69 ms no de uma só, perto dos p50 medidos. O que
+cresce na carteira única é a espera, não o trabalho de cada operação.
+
+**Por que 128 clientes deram resultado pior que 32?**
+A vazão caiu de 2.523 para 2.282 RPS e o p50 foi de 12 para 49,5 ms. O sistema já estava
+saturado com 32; mais clientes só alongam a fila. Minha hipótese é o pool de 10 conexões e a
+CPU dividida entre gerador, app, Postgres e Keycloak. Não medi qual dos dois limita, então
+digo que é hipótese.
+
+**O teste de carga é confiável?**
+Para comparar cenários, sim. Para números absolutos, não: gerador e sistema dividem a máquina,
+cada configuração rodou poucas vezes e não há intervalo de confiança. O `many` com 32 clientes
+rodou três vezes e variou de 2.523 a 2.792 RPS.
+
+**O que ficou sem medir?**
+O atraso da outbox, porque não há publisher; conflitos forçados, porque as repetições viram
+replay e as demais têm chave única, então 409/422 ficam em zero por construção; várias
+instâncias; e falhas durante a carga.
+
+**Replay é mais barato que operação nova?**
+Quase igual: 2.792 RPS sem replays contra 2.584 com 10%. Um replay ainda abre transação,
+reivindica a chave e lê a resposta gravada. A diferença é pequena e, com tão poucas rodadas,
+não distingo de ruído.
+
+---
+
+## 14. Perguntas difíceis
 
 **O Postgres caiu. E agora?**
 Tudo para: escrita, idempotência e lock dependem dele. Não há réplica. É o ponto único de
 falha, e está documentado.
 
+**Quais defeitos você conhece?**
+Estão no `ARCHITECTURE.md`, seção 10: a referência de um `WIN` não é validada; o ledger não
+tem chave estrangeira para a operação; a mensagem de `idempotency_key_reused` expõe o prefixo
+`postgres:`; e o outbox só grava eventos na abertura de carteira. Prefiro listar eu mesmo a
+deixar o avaliador achar.
+
 **Achei um bug: a mesma operação com outra chave devolve 500.**
-Correto, está na lista de defeitos conhecidos. O dinheiro não é movido duas vezes; o
-problema é o contrato da resposta.
+Era verdade e foi corrigido: agora responde 409 `duplicate_operation`. Eu mesmo achei ao
+reler o enunciado contra o código, e o teste cobre. O dinheiro nunca se movia duas vezes; o
+defeito era só o contrato da resposta.
 
 **Seu caso de uso está no adapter. Isso não fere a arquitetura hexagonal?**
 Fere. Fiz assim porque a transação é o coração da regra e eu quis ela visível. O preço é que
@@ -400,4 +503,7 @@ byte e não o caractere; e a contagem de operações incluir a linha de `OPENING
 6. Token de `provider-b` consultando a operação → 404.
 7. Mesma operação pela fila → sem novo débito.
 8. `docker compose stop localstack` → readiness 503.
-9. Abrir o `ARCHITECTURE.md` na seção 10 e dizer o que falta.
+9. Mesma aposta com um `playerId` que não é o dono da carteira → 404, saldo intacto.
+10. `go run ./cmd/loadtest -scenario single -duration 20s` e depois `-scenario many`: mostrar
+    a diferença de RPS e o `balance check: OK`.
+11. Abrir o `ARCHITECTURE.md` na seção 10 e dizer o que falta.

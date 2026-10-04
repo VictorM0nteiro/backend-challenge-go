@@ -388,6 +388,38 @@ func TestProcess_PlayerThatDoesNotOwnTheWalletIsRefused(t *testing.T) {
 	}
 }
 
+// TestProcess_SameExternalIDUnderAnotherKeyIsAConflictAndMovesNothing: the same
+// (provider, externalTransactionId) cannot be applied again by changing the
+// idempotency key. The second attempt must say so, leave the balance alone and
+// leave its own key unused.
+func TestProcess_SameExternalIDUnderAnotherKeyIsAConflictAndMovesNothing(t *testing.T) {
+	pool := newTestPool(t)
+	walletID := createTestWallet(t, NewWalletRepository(pool), 10000)
+	player := ownerOf(t, pool, walletID)
+	proc := NewWagerProcessor(pool)
+	ctx := context.Background()
+
+	if _, err := proc.Process(ctx, wagerReq(t, walletID, player, domain.WagerKindBet, "bet-1", "", 2500, "k-first")); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+
+	// Same external id, another key. The body is identical, so only the key differs.
+	_, err := proc.Process(ctx, wagerReq(t, walletID, player, domain.WagerKindBet, "bet-1", "", 2500, "k-second"))
+	if !errors.Is(err, ErrDuplicateExternalTransaction) {
+		t.Fatalf("err = %v, want ErrDuplicateExternalTransaction", err)
+	}
+	if got := balanceOf(t, pool, walletID); got != 7500 {
+		t.Fatalf("balance = %d, want 7500: the operation must not apply twice", got)
+	}
+	if got := keyRows(t, pool, "k-second"); got != 0 {
+		t.Fatalf("refused operation left %d key row(s) behind", got)
+	}
+	if got := countRows(t, pool, "wager_transactions"); got != 1 {
+		t.Fatalf("wager rows = %d, want 1", got)
+	}
+	assertLedgerMatchesBalance(t, pool, walletID)
+}
+
 // TestProcess_DistinctWalletsAdvanceInParallel runs one bet per wallet at the
 // same time. Every one must be processed, and each wallet must reconcile.
 func TestProcess_DistinctWalletsAdvanceInParallel(t *testing.T) {

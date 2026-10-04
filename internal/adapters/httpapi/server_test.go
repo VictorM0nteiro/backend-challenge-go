@@ -207,6 +207,26 @@ func TestSubmitWager_SameKeyWithDifferentBodyIs422(t *testing.T) {
 	}
 }
 
+func TestSubmitWager_SameOperationUnderAnotherKeyIs409(t *testing.T) {
+	base := newTestAPI(t)
+	walletID := openWallet(t, base, "1000.00")
+	bet := wagerBody(walletID, "t-dup", "BET", "25.00")
+
+	if status, out := call(t, http.MethodPost, base+wagersURL, wagerHeaders("provider-a", "k-one"), bet); status != http.StatusCreated {
+		t.Fatalf("first: status %d body %v", status, out)
+	}
+	status, out := call(t, http.MethodPost, base+wagersURL, wagerHeaders("provider-a", "k-two"), bet)
+	if status != http.StatusConflict || errorCode(out) != "duplicate_operation" {
+		t.Fatalf("status %d code %q, want 409 duplicate_operation", status, errorCode(out))
+	}
+
+	// The wallet was debited once.
+	status, out = call(t, http.MethodGet, base+"/wallets/"+walletID, bearer("wallet-service"), nil)
+	if status != http.StatusOK || out["balance"].(map[string]any)["amount"] != "975.00" {
+		t.Fatalf("wallet: status %d body %v, want balance 975.00", status, out)
+	}
+}
+
 func TestSubmitWager_InsufficientFundsIsARecordedRejectionNotAnError(t *testing.T) {
 	base := newTestAPI(t)
 	walletID := openWallet(t, base, "10.00")

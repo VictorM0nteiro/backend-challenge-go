@@ -26,6 +26,7 @@ func TestStatusFor(t *testing.T) {
 		{"jogador nao e dono da carteira", postgres.ErrWalletOwnerMismatch, 404, "not_found"},
 		{"chave reutilizada com corpo diferente", postgres.ErrIdempotencyKeyReuse, 422, "idempotency_key_reused"},
 		{"chave ainda em processamento", postgres.ErrRequestInFlight, 409, "request_in_flight"},
+		{"mesma operacao com outra chave", postgres.ErrDuplicateExternalTransaction, 409, "duplicate_operation"},
 		{"carteira ja existe", postgres.ErrWalletAlreadyExists, 409, "conflict"},
 		{"versao concorrente", postgres.ErrWalletVersionConflict, 409, "concurrent_update"},
 		{"prazo do banco esgotado", fmt.Errorf("acquire: %w", context.DeadlineExceeded), 503, "temporarily_unavailable"},

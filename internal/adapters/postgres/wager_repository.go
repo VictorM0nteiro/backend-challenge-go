@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/VictorM0nteiro/backend-challenge-go/internal/domain"
 )
@@ -33,10 +34,28 @@ func insertWagerTransaction(ctx context.Context, tx pgx.Tx, wt *domain.WagerTran
 		string(rec.State), nullableString(string(rec.FailureCode)), nullableMinor(rec.BalanceAfter),
 		rec.CreatedAt, rec.UpdatedAt,
 	)
+	if isConstraintViolation(err, externalTransactionUnique) {
+		// The same (provider, externalTransactionId) arrived under another
+		// idempotency key. Nothing is applied: returning the error rolls back
+		// the whole transaction, including the wallet change.
+		return ErrDuplicateExternalTransaction
+	}
 	if err != nil {
 		return fmt.Errorf("postgres: insert wager transaction: %w", err)
 	}
 	return nil
+}
+
+// externalTransactionUnique is the name Postgres gives the UNIQUE (provider_id,
+// external_transaction_id) constraint of wager_transactions. Other unique
+// indexes on the table, such as the one-reversal index, must not match.
+const externalTransactionUnique = "wager_transactions_provider_id_external_transaction_id_key"
+
+// isConstraintViolation reports whether err is a unique violation (23505) of
+// the named constraint.
+func isConstraintViolation(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == constraint
 }
 
 // findWagerByExternalID loads the operation a provider sent under

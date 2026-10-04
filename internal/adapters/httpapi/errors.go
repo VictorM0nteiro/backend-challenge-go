@@ -60,6 +60,9 @@ func statusFor(err error) (int, string) {
 		errors.Is(err, postgres.ErrDuplicateLedgerEntry):
 		return http.StatusConflict, "conflict"
 
+	case errors.Is(err, postgres.ErrDuplicateExternalTransaction):
+		return http.StatusConflict, "duplicate_operation"
+
 	case errors.Is(err, postgres.ErrWalletVersionConflict):
 		return http.StatusConflict, "concurrent_update"
 
