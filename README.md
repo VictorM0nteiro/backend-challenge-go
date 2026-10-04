@@ -181,7 +181,7 @@ go test -race ./... -p 1
 go test ./internal/domain/...     # só domínio: sem Docker, menos de 1 s
 ```
 
-`-p 1` roda um pacote por vez. No Windows com Docker Desktop, pacotes em paralelo às vezes
+O pacote `internal/e2e` **compila o binário** (`go build ./cmd/api`), então exige o Go no PATH, e leva ~25 s. `-p 1` roda um pacote por vez. No Windows com Docker Desktop, pacotes em paralelo às vezes
 falham ao conectar no Docker. `-race` exige um compilador C de 64 bits (`gcc`).
 
 O que cada pacote prova:
@@ -189,17 +189,19 @@ O que cada pacote prova:
 | Pacote | Prova |
 |---|---|
 | `internal/domain` | `Money`, carteira, máquina de estados, regras dos cinco tipos, abertura |
-| `internal/adapters/postgres` | constraints e triggers, ledger imutável, disputa de saldo (100 / duas apostas de 80), idempotência com 10 requisições simultâneas, reversões |
+| `internal/adapters/postgres` | constraints e triggers, ledger imutável, disputa de saldo (100 / duas apostas de 80), idempotência com 50 requisições simultâneas, reversões, uma carteira ocupada que não bloqueia outra |
 | `internal/adapters/httpapi` | contratos HTTP com tokens reais do Keycloak, isolamento entre provedores |
 | `internal/adapters/sqs` | consumo real no LocalStack, reentrega, mesma operação por HTTP e SQS, DLQ |
 | `internal/composition` | grafo Fx válido; início, atendimento e encerramento liberando o pool |
+| `internal/e2e` | **três processos reais** do binário contra Postgres e Keycloak: 100/80 em 30 carteiras ao mesmo tempo, a mesma chave 50 vezes, e replay depois de `Kill` e novo processo |
 
 ## Múltiplas instâncias e simulação de falhas
 
 Estes cenários rodam **à mão** contra o Compose. Foram executados na máquina de
-desenvolvimento (Windows 11, Docker Desktop) e os resultados abaixo são os observados. Não
-são testes automatizados: ver [ARCHITECTURE.md § 10](ARCHITECTURE.md#10-trabalho-não-concluído).
-Os comandos de shell usam o Git Bash.
+desenvolvimento (Windows 11, Docker Desktop) e os resultados abaixo são os observados. Os
+cenários 1, 2 e 5 também existem como **teste automatizado** em `internal/e2e`, com três
+processos reais e `kill`; os cenários 3, 4 e 6 a 9 são só manuais. Os comandos de shell usam
+o Git Bash.
 
 ### Preparação
 

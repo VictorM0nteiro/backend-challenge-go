@@ -18,7 +18,7 @@ ledger que não pode ser alterado.
 O enunciado é de nível pleno/sênior e o prazo era de três dias. Preferi entregar o núcleo
 financeiro bem testado e documentar o resto do que entregar tudo pela metade. O que ficou de
 fora está na seção 10 do `ARCHITECTURE.md`: publisher da outbox, worker de referências
-pendentes, reconciliação, ledger paginado, métricas e a prova com três instâncias. A seção 11
+pendentes, reconciliação, ledger paginado e métricas. A seção 11
 do mesmo arquivo compara o que fiz com cada critério de avaliação.
 
 **Se tivesse mais um dia, o que faria primeiro?**
@@ -90,8 +90,11 @@ mesmo tempo. E o teste de carga mostra a diferença: 2.523 RPS com 50 carteiras 
 com uma só.
 
 **Isso funciona com três instâncias da aplicação?**
-O desenho sim, porque o lock é do banco e não um mutex em memória. Mas eu não demonstrei
-isso com três processos; está listado como não feito.
+Sim, e está testado com processos de verdade. O pacote `internal/e2e` compila o binário,
+sobe três processos independentes (memória e pool próprios) contra o mesmo Postgres e
+dispara as apostas pelo HTTP. O lock é do banco, não um mutex em memória, então os três
+processos se coordenam sem se conhecer. O que o teste não exercita é o consumidor SQS entre
+instâncias.
 
 **Um `sync.Mutex` não resolveria?**
 Só dentro de um processo. Com duas instâncias, cada uma teria o seu mutex e as duas
@@ -380,9 +383,25 @@ Acesso concorrente à memória sem sincronização, dentro do processo. Não det
 corrida no banco — para isso servem os testes de integração.
 
 **O que não está testado?**
-Queda de processo no meio, reinício da aplicação, três instâncias, indisponibilidade do
-banco, publishers concorrentes, e expiração real de token no Keycloak (só com token
-assinado no teste).
+A interrupção do consumidor entre o commit e a remoção da mensagem, publishers concorrentes,
+reversão antes da referência (não há worker), o consumidor SQS entre várias instâncias,
+indisponibilidade do banco e da fila (só à mão, documentada no README) e a expiração real de
+token no Keycloak (só com token assinado no teste).
+
+**Como você testa vários processos?**
+O pacote `internal/e2e` compila o binário real e o inicia três vezes com `os/exec`, em portas
+livres, contra um Postgres e um Keycloak de testcontainers. Três testes: 100/80 em 30
+carteiras ao mesmo tempo, a mesma chave 50 vezes espalhada nos três, e replay depois de
+`Process.Kill()` seguido de um processo novo. O `Kill` é o equivalente prático do `kill -9`.
+
+**O seu teste do 100/80 pegaria a falta do lock?**
+A primeira versão não pegava, e eu só descobri porque testei o teste. Com uma carteira só, ele
+passava mesmo sem o `FOR UPDATE`, três vezes seguidas: a disputa dura milissegundos e as três
+requisições quase nunca se sobrepõem. Removi o lock numa cópia do projeto para conferir. A
+versão final usa 30 carteiras liberadas no mesmo instante por um canal, e aí passa 3 de 3 com
+o lock e falha 3 de 3 sem ele. Sem o lock, a versão (`WHERE version = ...`) ainda impediu o
+dinheiro perdido: a requisição perdedora recebeu 409 e o teste acusou. É a defesa em
+profundidade funcionando.
 
 **Como você conferiu que o saldo bate?**
 Dois níveis. Nos testes de integração, `assertLedgerMatchesBalance` verifica que o saldo
